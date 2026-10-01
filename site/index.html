@@ -87,7 +87,8 @@ tbody tr{cursor:pointer}tbody tr:hover,tbody tr.sel{background:var(--hl)}
     <div id="chart"></div>
   </div>
   <div class="card">
-    <p id="count"></p>
+    <div class="chartHead"><p id="count" style="margin:0"></p>
+      <select id="view"><option value="all">表格：全部欄位</option><option value="t" selected>表格：技術面</option><option value="c">表格：籌碼面</option></select></div>
     <div class="tablewrap"><table><thead id="thead"></thead><tbody id="tbody"></tbody></table></div>
   </div>
 </section>
@@ -161,16 +162,24 @@ const PRESETS = {
     min:0, sort:desc("score","tot5")}
 };
 const SUBS = ["KD","RSI","MACD","法人買賣超","融資融券","DMI","OBV","W%R","CCI","MFI","乖離率"];
-const COLS = [
+const COLS_ALL = [
   {k:"code",t:"代號",l:1},{k:"name",t:"名稱",l:1},{k:"market",t:"市場",l:1},{k:"industry",t:"產業",l:1},
   {k:"score",t:"訊號數",preset:1},{k:"reason",t:"符合訊號",preset:1,cls:"reason"},
-  {k:"close",t:"收盤",d:2},{k:"chg_pct",t:"漲跌%",d:2,sign:1},{k:"vol_lots",t:"量(張)",d:0},{k:"vol_ratio",t:"量比",d:2},
-  {k:"ret20",t:"20日%",d:1,sign:1},{k:"rsi",t:"RSI",d:1},{k:"K",t:"K",d:1},{k:"D",t:"D",d:1},
-  {k:"f1",t:"外資(張)",d:0,sign:1},{k:"t1",t:"投信(張)",d:0,sign:1},{k:"d1",t:"自營(張)",d:0,sign:1},
-  {k:"tot5",t:"法人5日",d:0,sign:1},{k:"t_streak",t:"投信連",d:0,sign:1},{k:"m_chg",t:"資增減",d:0,sign:1},{k:"ms_ratio",t:"券資比%",d:1},
-  {k:"bias20",t:"乖離%",d:1,sign:1},{k:"adx",t:"ADX",d:1},{k:"amp20",t:"振幅20%",d:1},{k:"turnover20",t:"均值(億)",d:1}
+  {k:"close",t:"收盤",d:2},{k:"chg_pct",t:"漲跌%",d:2,sign:1},{k:"vol_lots",t:"量(張)",d:0},{k:"vol_ratio",t:"量比",d:2,g:"t"},
+  {k:"ret20",t:"20日%",d:1,sign:1,g:"t"},{k:"rsi",t:"RSI",d:1,g:"t"},{k:"K",t:"K",d:1,g:"t"},{k:"D",t:"D",d:1,g:"t"},
+  {k:"f1",t:"外資",d:0,sign:1,g:"c"},{k:"t1",t:"投信",d:0,sign:1,g:"c"},{k:"d1",t:"自營",d:0,sign:1,g:"c"},
+  {k:"f5",t:"外資5日",d:0,sign:1,g:"c"},{k:"f20",t:"外資20日",d:0,sign:1,g:"c"},{k:"f60",t:"外資60日",d:0,sign:1,g:"c"},
+  {k:"f120",t:"外資半年",d:0,sign:1,g:"c"},{k:"f240",t:"外資一年",d:0,sign:1,g:"c"},
+  {k:"t5",t:"投信5日",d:0,sign:1,g:"c"},{k:"t20",t:"投信20日",d:0,sign:1,g:"c"},{k:"t60",t:"投信60日",d:0,sign:1,g:"c"},
+  {k:"t120",t:"投信半年",d:0,sign:1,g:"c"},{k:"t240",t:"投信一年",d:0,sign:1,g:"c"},
+  {k:"tot5",t:"法人5日",d:0,sign:1,g:"c"},{k:"tot20",t:"法人20日",d:0,sign:1,g:"c"},
+  {k:"tot60",t:"法人60日",d:0,sign:1,g:"c"},{k:"tot240",t:"法人一年",d:0,sign:1,g:"c"},
+  {k:"f_streak",t:"外資連",d:0,sign:1,g:"c"},{k:"t_streak",t:"投信連",d:0,sign:1,g:"c"},
+  {k:"m_chg",t:"資增減",d:0,sign:1,g:"c"},{k:"m_chg5",t:"資5日",d:0,sign:1,g:"c"},{k:"ms_ratio",t:"券資比%",d:1,g:"c"},
+  {k:"bias20",t:"乖離%",d:1,sign:1,g:"t"},{k:"adx",t:"ADX",d:1,g:"t"},{k:"amp20",t:"振幅20%",d:1,g:"t"},{k:"turnover20",t:"均值(億)",d:1,g:"t"}
 ];
 const MAX_ROWS = 300;
+const VIEW_NOTE = {all:"", t:"", c:"（籌碼單位：張；連＝連續買(+)／賣(−)天數）"};
 
 // ------------------------------------------------------------------ 工具
 const $ = id => document.getElementById(id);
@@ -204,6 +213,7 @@ $("reset").onclick = ()=>{
   document.querySelectorAll("input[name=mkt]").forEach(c=>c.checked=true);
   sortKey=null; render();
 };
+$("view").onchange = render;
 $("sub").onchange = $("bb").onchange = ()=> current && drawChart(current.code, current.name);
 $("closeChart").onclick = ()=>{ $("chartBox").hidden=true; current=null; };
 
@@ -241,9 +251,10 @@ function filterRows(){
 function render(){
   if(!DATA.length) return;
   const rows=filterRows(), presetOn=$("preset").value!=="none";
-  const cols=COLS.filter(c=>!c.preset||presetOn);
+  const view=$("view").value;
+  const cols=COLS_ALL.filter(c=>(!c.preset||presetOn) && (view==="all"||!c.g||c.g===view));
   lastRows=rows;
-  $("count").textContent=`符合條件：${rows.length} 檔`+(rows.length>MAX_ROWS?`（只顯示前 ${MAX_ROWS} 檔）`:"")+"　點任一列看線圖，點欄位標題可排序";
+  $("count").textContent=`符合條件：${rows.length} 檔`+(rows.length>MAX_ROWS?`（只顯示前 ${MAX_ROWS} 檔）`:"")+"　點任一列看線圖，點欄位標題可排序"+VIEW_NOTE[$("view").value];
   $("thead").innerHTML="<tr>"+cols.map(c=>`<th class="${c.l?"l":""}" data-k="${c.k}">${c.t}${sortKey===c.k?(sortDir>0?" ▲":" ▼"):""}</th>`).join("")+"</tr>";
   $("tbody").innerHTML=rows.slice(0,MAX_ROWS).map((r,i)=>`<tr data-i="${i}" class="${current&&current.code===r.code?"sel":""}">`+cols.map(c=>{
     let v=r[c.k], cls=c.cls||(c.l?"l":"");
@@ -291,7 +302,10 @@ async function drawChart(code,name){
   if(s==="法人買賣超"){ if(!p.fi){ tr.push(ref(0,Y)); } else {
     tr.push({type:"bar",x,y:p.fi,name:"外資",yaxis:Y,marker:{color:"#1565c0"}},
             {type:"bar",x,y:p.ti,name:"投信",yaxis:Y,marker:{color:"#ef6c00"}},
-            {type:"bar",x,y:p.di,name:"自營商",yaxis:Y,marker:{color:"#8d6e63"}}); } }
+            {type:"bar",x,y:p.di,name:"自營商",yaxis:Y,marker:{color:"#8d6e63"}});
+    const cum=a=>{let s=0,seen=false; return a.map(v=>{ if(v==null) return seen?s:null; seen=true; s+=v; return s; });};
+    tr.push(line(cum(p.fi),"外資累積","#1565c0","y4",{line:{width:2,dash:"dot",color:"#1565c0"}}),
+            line(cum(p.ti),"投信累積","#ef6c00","y4",{line:{width:2,dash:"dot",color:"#ef6c00"}})); } }
   if(s==="融資融券"){ if(p.mb){ tr.push(line(p.mb,"融資餘額(張)","#d32f2f",Y,{connectgaps:true}),
                                        line(p.sb,"融券餘額(張)","#2e7d32","y4",{connectgaps:true})); } else tr.push(ref(0,Y)); }
   if(s==="DMI"){ tr.push(line(p.pdi,"+DI",UP,Y),line(p.mdi,"-DI",DN,Y),line(p.adx,"ADX","#212121",Y),ref(25,Y)); }
@@ -308,7 +322,7 @@ async function drawChart(code,name){
     xaxis:{type:"category",rangeslider:{visible:false},nticks:8,gridcolor:grid,showspikes:true},
     yaxis:ax([0.46,1],{title:"股價"}), yaxis2:ax([0.28,0.42],{title:"張"}),
     yaxis3:ax([0,0.24],{title:s==="法人買賣超"?"張":s==="融資融券"?"融資(張)":s,...(range?{range}:{})}),
-    yaxis4:{overlaying:"y3",side:"right",showgrid:false,zeroline:false,title:s==="融資融券"?"融券(張)":""},
+    yaxis4:{overlaying:"y3",side:"right",showgrid:false,zeroline:false,title:s==="融資融券"?"融券(張)":s==="法人買賣超"?"累積(張)":""},
     barmode:"relative", bargap:0.2
   },{responsive:true,displaylogo:false});
 }
