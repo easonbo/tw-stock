@@ -2,8 +2,9 @@ name: 每日更新台股資料
 
 on:
   schedule:
-    - cron: "30 7 * * 1-5"      # 台灣時間 週一～五 15:30
-  workflow_dispatch:             # 在 Actions 頁面可手動更新
+    - cron: "30 7 * * 1-5"      # 台灣時間 週一～五 15:30：股價＋三大法人
+    - cron: "40 13 * * 1-5"     # 台灣時間 週一～五 21:40：補融資融券
+  workflow_dispatch:
   push:
     branches: [main]
     paths: ["site/**", "update.py", ".github/workflows/**"]
