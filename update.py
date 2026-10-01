@@ -3,6 +3,8 @@
 台股上市櫃 每日技術指標更新
 - 清單：TWSE OpenAPI t187ap03_L（上市）＋ 公開資訊觀測站 t187ap03_O.csv（上櫃）
 - 價量：Yahoo Finance（上市 .TW／上櫃 .TWO），透過 yfinance
+- 籌碼：證交所 T86（上市三大法人）、MI_MARGN（上市融資融券）；
+        櫃買中心 insti/dailyTrade（上櫃三大法人）、margin/balance（上櫃融資融券）
 - 輸出：site/data/snapshot.json（每檔最新指標）＋ site/data/px/<代號>.json（近 180 日線圖資料）
 - 歷史價量存在 cache/hist.pkl（由 GitHub Actions cache 保留），每天只補抓最近一個月
 本機測試：TEST_MODE=1 python update.py（用模擬資料，不連網）
@@ -154,6 +156,209 @@ def update_history(listed):
     pickle.dump(hist, open(path, "wb"))
     return hist
 
+# --------------------------------------------------------------------------- 籌碼
+CHIP_DAYS = 20                       # 保留／回補最近幾個交易日
+MAX_CHIP_REQ = 90                    # 每次執行最多發幾個籌碼請求（避免被證交所擋）
+UA = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) Chrome/124.0 Safari/537.36", "Accept": "application/json"}
+TPEX_WWW = "https://www.tpex.org.tw/www/zh-tw"
+
+HOST_FAILS = {}                      # 連線失敗計數：同一網站連續失敗 3 次就停止本次請求
+
+def get_json(url, params):
+    host = url.split("/")[2]
+    if HOST_FAILS.get(host, 0) >= 3:
+        return None
+    for attempt in range(2):
+        try:
+            r = requests.get(url, params=params, headers=UA, timeout=30)
+            if r.status_code == 200:
+                HOST_FAILS[host] = 0
+                try:
+                    return r.json()
+                except ValueError:
+                    return None                # 非 JSON（例如假日的說明頁）
+            print(f"  {host} HTTP {r.status_code}")
+        except Exception as e:
+            print(f"  {host} 連線失敗：{e}")
+        time.sleep(5)
+    HOST_FAILS[host] = HOST_FAILS.get(host, 0) + 1
+    if HOST_FAILS[host] >= 3:
+        print(f"⚠ {host} 連續失敗，本次略過該網站的籌碼資料")
+    return None
+
+def to_num(x):
+    try:
+        return float(str(x).replace(",", "").strip())
+    except (TypeError, ValueError):
+        return np.nan
+
+def _nz(x):
+    return 0.0 if np.isnan(x) else x
+
+def _same_day(resp_date, day):
+    """回應日期與要求日期一致才接受（相容 20261001 / 115/10/01 / 2026/10/01）。"""
+    d = re.sub(r"\D", "", str(resp_date or ""))
+    if len(d) == 8:
+        return d == day.strftime("%Y%m%d")
+    if len(d) == 7:                                    # 民國年
+        return int(d[:3]) + 1911 == day.year and d[3:] == day.strftime("%m%d")
+    return True                                        # 沒有日期欄位就不檢查
+
+def _idx(fields, name, fallback, nth=0):
+    hits = [i for i, f in enumerate(fields) if str(f).strip() == name]
+    return hits[nth] if len(hits) > nth else fallback
+
+def _first_table(j):
+    t = (j or {}).get("tables") or []
+    return t[0] if t and isinstance(t[0], dict) else {}
+
+def twse_inst(day):
+    j = get_json("https://www.twse.com.tw/rwd/zh/fund/T86",
+                 {"date": day.strftime("%Y%m%d"), "selectType": "ALLBUT0999", "response": "json"})
+    if not j or j.get("stat") != "OK" or not j.get("data") or not _same_day(j.get("date"), day):
+        return None
+    f = j.get("fields") or []
+    i_f1 = _idx(f, "外陸資買賣超股數(不含外資自營商)", 4); i_f2 = _idx(f, "外資自營商買賣超股數", 7)
+    i_t = _idx(f, "投信買賣超股數", 10); i_d = _idx(f, "自營商買賣超股數", 11); i_s = _idx(f, "三大法人買賣超股數", 18)
+    out = {}
+    for r in j["data"]:
+        if len(r) <= max(i_f1, i_f2, i_t, i_d, i_s):
+            continue
+        fv = _nz(to_num(r[i_f1])) + _nz(to_num(r[i_f2]))
+        out[str(r[0]).strip()] = [fv / 1000, to_num(r[i_t]) / 1000, to_num(r[i_d]) / 1000, to_num(r[i_s]) / 1000]
+    return out or None
+
+def tpex_inst(day):
+    j = get_json(f"{TPEX_WWW}/insti/dailyTrade",
+                 {"type": "Daily", "sect": "EW", "date": day.strftime("%Y/%m/%d"), "response": "json"})
+    rows = _first_table(j).get("data") or []
+    if not rows or not _same_day((j or {}).get("date"), day):
+        return None
+    # 欄位：代號,名稱, 外資(不含自營)[2:5], 外資自營[5:8], 外資合計[8:11], 投信[11:14],
+    #       自營自行[14:17], 自營避險[17:20], 自營合計[20:23], 三大法人合計[23]
+    out = {str(r[0]).strip(): [to_num(r[10]) / 1000, to_num(r[13]) / 1000, to_num(r[22]) / 1000, to_num(r[23]) / 1000]
+           for r in rows if len(r) > 23}
+    return out or None
+
+def twse_margin(day):
+    j = get_json("https://www.twse.com.tw/exchangeReport/MI_MARGN",
+                 {"date": day.strftime("%Y%m%d"), "selectType": "ALL", "response": "json"})
+    if not j or j.get("stat") != "OK" or not _same_day(j.get("date"), day):
+        return None
+    tables = j.get("tables") or []
+    if len(tables) < 2 or not tables[1].get("data"):
+        return None
+    f = tables[1].get("fields") or []
+    # 欄位：代號,名稱, 融資(買進,賣出,現金償還,前日餘額,今日餘額,限額), 融券(買進,賣出,現券償還,前日餘額,今日餘額,限額), 資券互抵, 註記
+    mp, mb = _idx(f, "前日餘額", 5, 0), _idx(f, "今日餘額", 6, 0)
+    sp, sb = _idx(f, "前日餘額", 11, 1), _idx(f, "今日餘額", 12, 1)
+    out = {str(r[0]).strip(): [to_num(r[mb]), to_num(r[mp]), to_num(r[sb]), to_num(r[sp])]
+           for r in tables[1]["data"] if len(r) > max(mb, sb)}
+    return out or None
+
+def tpex_margin(day):
+    j = get_json(f"{TPEX_WWW}/margin/balance", {"date": day.strftime("%Y/%m/%d"), "response": "json"})
+    rows = _first_table(j).get("data") or []
+    if not rows or not _same_day((j or {}).get("date"), day):
+        return None
+    # 欄位：代號,名稱,前資餘額,資買,資賣,現償,資餘額,…,前券餘額[10],券賣,券買,券償,券餘額[14],…
+    out = {str(r[0]).strip(): [to_num(r[6]), to_num(r[2]), to_num(r[14]), to_num(r[10])]
+           for r in rows if len(r) > 14}
+    return out or None
+
+CHIP_SOURCES = {"inst": {"tse": twse_inst, "otc": tpex_inst},
+                "margin": {"tse": twse_margin, "otc": tpex_margin}}
+
+def trading_days(hist):
+    cnt = {}
+    for df in hist.values():
+        for d in df.index[-CHIP_DAYS - 5:]:
+            cnt[d] = cnt.get(d, 0) + 1
+    n = max(cnt.values()) if cnt else 0
+    return sorted(d for d, c in cnt.items() if c >= 0.3 * n)[-CHIP_DAYS:]
+
+def fake_chips(days, codes):
+    rng = np.random.default_rng(2); ch = {"inst": {}, "margin": {}}
+    bal = {c: rng.uniform(500, 20000) for c in codes}
+    for d in days:
+        k = d.strftime("%Y-%m-%d"); ch["inst"][k] = {}; ch["margin"][k] = {}
+        for mkt in ("tse", "otc"):
+            ch["inst"][k][mkt] = {c: list(rng.normal(0, 300, 3)) + [0] for c in codes}
+            for v in ch["inst"][k][mkt].values():
+                v[3] = sum(v[:3])
+            m = {}
+            for c in codes:
+                prev = bal[c]; bal[c] = max(0, prev + rng.normal(0, 200))
+                m[c] = [bal[c], prev, bal[c] * 0.1, prev * 0.1]
+            ch["margin"][k][mkt] = m
+    return ch
+
+def update_chips(days, codes):
+    if TEST:
+        return fake_chips(days, codes)
+    path = os.path.join(CACHE, "chips.pkl")
+    ch = pickle.load(open(path, "rb")) if os.path.exists(path) else {"inst": {}, "margin": {}}
+    keep = {d.strftime("%Y-%m-%d") for d in days}
+    budget, fails = MAX_CHIP_REQ, 0
+    for kind, srcs in CHIP_SOURCES.items():
+        ch[kind] = {k: v for k, v in ch[kind].items() if k in keep}
+        for d in reversed(days):                      # 先補最新的日期
+            k = d.strftime("%Y-%m-%d"); slot = ch[kind].setdefault(k, {})
+            for mkt, fn in srcs.items():
+                if slot.get(mkt) or budget <= 0:
+                    continue
+                budget -= 1
+                got = fn(d)
+                time.sleep(3)                         # 證交所限制請求頻率
+                if got:
+                    slot[mkt] = got
+                else:
+                    fails += 1
+    pickle.dump(ch, open(path, "wb"))
+    for kind in ch:
+        have = sorted(k for k, v in ch[kind].items() if v.get("tse") or v.get("otc"))
+        print(f"籌碼 {kind}: {len(have)} 天" + (f"（{have[0]} ~ {have[-1]}）" if have else ""))
+    if fails:
+        print(f"  其中 {fails} 個請求沒有資料（多半是尚未公布，下次執行會再補）")
+    return ch
+
+def merged(ch, kind):
+    """{日期: {代號: [...]}}，上市上櫃合併。"""
+    return {k: {**(v.get("tse") or {}), **(v.get("otc") or {})} for k, v in sorted(ch[kind].items())
+            if v.get("tse") or v.get("otc")}
+
+def chip_stats(code, inst, marg, last_price_date):
+    s = {}
+    idays = [k for k in inst if k <= last_price_date]
+    rows = [inst[k].get(code) for k in idays]
+    if idays and rows[-1] is not None:
+        arr = np.array([r if r is not None else [np.nan] * 4 for r in rows], dtype=float)
+        last = arr[-1]
+        s.update(inst_date=idays[-1], f1=last[0], t1=last[1], d1=last[2], tot1=last[3])
+        for n in (5, 20):
+            tail = arr[-n:]
+            s[f"f{n}"], s[f"t{n}"], s[f"tot{n}"] = (float(np.nansum(tail[:, i])) for i in (0, 1, 3))
+        def streak(col):
+            k = 0; sign = 0
+            for v in arr[::-1, col]:
+                sg = 0 if np.isnan(v) or v == 0 else (1 if v > 0 else -1)
+                if sg == 0 or (sign and sg != sign):
+                    break
+                sign = sg; k += 1
+            return k * sign
+        s["f_streak"], s["t_streak"] = streak(0), streak(1)
+    mdays = [k for k in marg if k <= last_price_date]
+    mrows = [marg[k].get(code) for k in mdays]
+    if mdays and mrows[-1] is not None:
+        mb, mp, sb, sp = mrows[-1]
+        s.update(margin_date=mdays[-1], m_bal=mb, m_chg=mb - mp, s_bal=sb, s_chg=sb - sp,
+                 ms_ratio=(sb / mb * 100) if mb and mb > 0 else None)
+        back = [r for r in mrows[-5:] if r is not None]
+        s["m_chg5"] = mb - back[0][1] if back else None
+    return {k: (round(float(v), 2) if isinstance(v, (float, np.floating)) and not np.isnan(v)
+                else (None if isinstance(v, float) else v)) for k, v in s.items()}
+
 # --------------------------------------------------------------------------- 指標
 def wilder(s, n):
     return s.ewm(alpha=1 / n, adjust=False).mean()
@@ -270,13 +475,21 @@ CHART_COLS = ["ma5","ma10","ma20","ma60","ma120","ma240","up","dn","K","D","rsi"
 def arr(s, nd=2):
     return [None if pd.isna(v) else round(float(v), nd) for v in s]
 
-def chart_json(df, x):
+def chart_json(df, x, code=None, inst=None, marg=None):
     d, y = df.tail(CHART_ROWS), x.tail(CHART_ROWS)
-    out = {"d": [i.strftime("%Y-%m-%d") for i in d.index],
+    days = [i.strftime("%Y-%m-%d") for i in d.index]
+    out = {"d": days,
            "o": arr(d["Open"]), "h": arr(d["High"]), "l": arr(d["Low"]), "c": arr(d["Close"]),
            "v": arr(d["Volume"] / 1000, 0)}
     for col in CHART_COLS:
         out[col] = arr(y[col] / 1000 if col.startswith("obv") else y[col])
+    if inst:
+        for j, key in enumerate(("fi", "ti", "di")):
+            out[key] = [None if (inst.get(k) or {}).get(code) is None else round(inst[k][code][j]) for k in days]
+    if marg:
+        for j, key in ((0, "mb"), (2, "sb")):
+            out[key] = [None if (marg.get(k) or {}).get(code) is None or np.isnan(marg[k][code][j])
+                        else round(marg[k][code][j]) for k in days]
     return out
 
 # --------------------------------------------------------------------------- main
@@ -289,6 +502,12 @@ def main():
     else:
         listed = get_list()
     hist = update_history(listed)
+    try:
+        ch = update_chips(trading_days(hist), [s["code"] for s in listed])
+        inst, marg = merged(ch, "inst"), merged(ch, "margin")
+    except Exception as e:                                  # 籌碼失敗不影響技術面
+        print(f"⚠ 籌碼資料更新失敗：{e}")
+        inst, marg = {}, {}
     rows, errs = [], []
     for s in listed:
         df = hist.get(s["code"])
@@ -296,8 +515,9 @@ def main():
             continue
         try:
             x = indicators(df)
-            rows.append({**s, **snapshot(df, x)})
-            json.dump(chart_json(df, x), open(os.path.join(PXDIR, s["code"] + ".json"), "w"),
+            snap = snapshot(df, x)
+            rows.append({**s, **snap, **chip_stats(s["code"], inst, marg, snap["date"])})
+            json.dump(chart_json(df, x, s["code"], inst, marg), open(os.path.join(PXDIR, s["code"] + ".json"), "w"),
                       separators=(",", ":"))
         except Exception as e:
             errs.append(f"{s['code']}: {e}")
@@ -307,6 +527,8 @@ def main():
         sys.exit("沒有任何股票算出指標，停止（避免把網站覆蓋成空的）")
     last = max(r["date"] for r in rows)
     meta = dict(updated=dt.datetime.now(TZ).strftime("%Y-%m-%d %H:%M"), last_date=last,
+                inst_date=max((r.get("inst_date") or "" for r in rows), default="") or None,
+                margin_date=max((r.get("margin_date") or "" for r in rows), default="") or None,
                 n_list=len(listed), n_rows=len(rows), n_stale=sum(r["date"] < last for r in rows), rows=rows)
     json.dump(meta, open(os.path.join(OUT, "snapshot.json"), "w", encoding="utf-8"),
               ensure_ascii=False, separators=(",", ":"))
