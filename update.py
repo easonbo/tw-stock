@@ -21,7 +21,7 @@ OUT   = os.path.join(ROOT, "site", "data")
 PXDIR = os.path.join(OUT, "px")
 TEST  = os.environ.get("TEST_MODE") == "1"
 TZ    = ZoneInfo("Asia/Taipei")
-KEEP_ROWS, CHART_ROWS, MIN_ROWS = 320, 180, 80
+KEEP_ROWS, CHART_ROWS, MIN_ROWS = 320, 250, 80
 
 IND_MAP = {
   "01":"水泥工業","02":"食品工業","03":"塑膠工業","04":"紡織纖維","05":"電機機械",
@@ -157,8 +157,8 @@ def update_history(listed):
     return hist
 
 # --------------------------------------------------------------------------- 籌碼
-CHIP_DAYS = 20                       # 保留／回補最近幾個交易日
-MAX_CHIP_REQ = 90                    # 每次執行最多發幾個籌碼請求（避免被證交所擋）
+CHIP_DAYS = 245                      # 保留／回補最近幾個交易日（約 1 年）
+MAX_CHIP_REQ = 300                   # 每次執行最多發幾個籌碼請求（每 3 秒 1 個，約 20 分鐘）
 UA = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
                     "(KHTML, like Gecko) Chrome/124.0 Safari/537.36", "Accept": "application/json"}
 TPEX_WWW = "https://www.tpex.org.tw/www/zh-tw"
@@ -301,10 +301,12 @@ def update_chips(days, codes):
     ch = pickle.load(open(path, "rb")) if os.path.exists(path) else {"inst": {}, "margin": {}}
     keep = {d.strftime("%Y-%m-%d") for d in days}
     budget, fails = MAX_CHIP_REQ, 0
-    for kind, srcs in CHIP_SOURCES.items():
+    for kind in CHIP_SOURCES:
         ch[kind] = {k: v for k, v in ch[kind].items() if k in keep}
-        for d in reversed(days):                      # 先補最新的日期
-            k = d.strftime("%Y-%m-%d"); slot = ch[kind].setdefault(k, {})
+    for d in reversed(days):                          # 由新到舊回補，法人與資券交錯進行
+        k = d.strftime("%Y-%m-%d")
+        for kind, srcs in CHIP_SOURCES.items():
+            slot = ch[kind].setdefault(k, {})
             for mkt, fn in srcs.items():
                 if slot.get(mkt) or budget <= 0:
                     continue
@@ -336,7 +338,7 @@ def chip_stats(code, inst, marg, last_price_date):
         arr = np.array([r if r is not None else [np.nan] * 4 for r in rows], dtype=float)
         last = arr[-1]
         s.update(inst_date=idays[-1], f1=last[0], t1=last[1], d1=last[2], tot1=last[3])
-        for n in (5, 20):
+        for n in (5, 20, 60, 120, 240):
             tail = arr[-n:]
             s[f"f{n}"], s[f"t{n}"], s[f"tot{n}"] = (float(np.nansum(tail[:, i])) for i in (0, 1, 3))
         def streak(col):
