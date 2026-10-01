@@ -1,0 +1,286 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>台股上市櫃 技術選股</title>
+<script src="https://cdn.plot.ly/plotly-2.35.2.min.js" charset="utf-8"></script>
+<style>
+:root{--bg:#f6f7f9;--card:#fff;--fg:#1d2330;--mute:#6b7280;--line:#e3e6eb;--acc:#1f5eff;--up:#d32f2f;--dn:#2e7d32;--hl:#eef3ff}
+@media (prefers-color-scheme:dark){:root{--bg:#12151b;--card:#1b2029;--fg:#e6e9ef;--mute:#9aa3b2;--line:#2b313c;--acc:#7aa2ff;--hl:#232c3d}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 -apple-system,"PingFang TC","Noto Sans TC","Microsoft JhengHei",sans-serif}
+header{display:flex;flex-wrap:wrap;align-items:baseline;gap:12px;padding:14px 20px;border-bottom:1px solid var(--line);background:var(--card)}
+header h1{font-size:18px;margin:0}
+#status{color:var(--mute);font-size:13px}
+.layout{display:grid;grid-template-columns:280px 1fr;gap:16px;padding:16px 20px;align-items:start}
+@media (max-width:860px){.layout{grid-template-columns:1fr;padding:12px}}
+aside,.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px}
+aside label{display:block;margin:10px 0 4px;font-weight:600}
+aside select,aside input[type=number],aside input[type=search]{width:100%;padding:6px 8px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--fg);font:inherit}
+.hint{color:var(--mute);font-size:12.5px;margin:6px 0 0;min-height:1em}
+.row2{display:flex;gap:6px;align-items:center}.row2 input{width:50%!important}
+.chk{display:flex;gap:6px;align-items:center;font-weight:400!important;margin:4px 0!important}
+.inline{display:flex;gap:14px}
+details{margin-top:14px;border-top:1px solid var(--line);padding-top:10px}
+summary{cursor:pointer;font-weight:600;color:var(--acc)}
+fieldset{border:none;padding:0;margin:10px 0 0}legend{font-weight:600;color:var(--mute);font-size:12.5px}
+button{font:inherit;padding:6px 12px;border-radius:6px;border:1px solid var(--line);background:var(--bg);color:var(--fg);cursor:pointer}
+button.primary{background:var(--acc);border-color:var(--acc);color:#fff}
+#count{margin:0 0 8px;color:var(--mute)}
+.tablewrap{overflow:auto;max-height:70vh}
+table{border-collapse:collapse;width:100%;font-variant-numeric:tabular-nums}
+th,td{padding:6px 8px;border-bottom:1px solid var(--line);white-space:nowrap;text-align:right}
+th{position:sticky;top:0;background:var(--card);cursor:pointer;user-select:none;font-weight:600}
+th.l,td.l{text-align:left}
+tbody tr{cursor:pointer}tbody tr:hover,tbody tr.sel{background:var(--hl)}
+.pos{color:var(--up)}.neg{color:var(--dn)}.stale{color:var(--mute)}
+.reason{white-space:normal;min-width:180px;text-align:left;color:var(--mute);font-size:12.5px}
+#chartBox{margin-bottom:16px}
+.chartHead{display:flex;flex-wrap:wrap;gap:10px;align-items:center;justify-content:space-between}
+.chartHead h2{font-size:16px;margin:0}
+#chart{height:640px}
+</style>
+</head>
+<body>
+<header><h1>台股上市櫃 技術選股</h1><span id="status">載入中…</span></header>
+<div class="layout">
+<aside>
+  <label for="preset">策略選股</label>
+  <select id="preset"></select>
+  <p class="hint" id="presetDesc"></p>
+
+  <label>市場</label>
+  <div class="inline">
+    <label class="chk"><input type="checkbox" name="mkt" value="上市" checked>上市</label>
+    <label class="chk"><input type="checkbox" name="mkt" value="上櫃" checked>上櫃</label>
+  </div>
+  <label for="ind">產業</label>
+  <select id="ind"><option value="">全部</option></select>
+  <label for="minvol">最低成交量（張）</label>
+  <input id="minvol" type="number" value="500" step="100" min="0">
+  <label for="q">搜尋代號／名稱</label>
+  <input id="q" type="search" placeholder="例：2330 或 台積電">
+
+  <details id="adv">
+    <summary>進階篩選</summary>
+    <label>量比 ≥（今日量／20日均量）</label><input id="vr" type="number" step="0.1" min="0" placeholder="不限">
+    <label>RSI(14) 區間</label><div class="row2"><input id="rsiMin" type="number" placeholder="最小">～<input id="rsiMax" type="number" placeholder="最大"></div>
+    <label>K 值 區間</label><div class="row2"><input id="kMin" type="number" placeholder="最小">～<input id="kMax" type="number" placeholder="最大"></div>
+    <label>20 日漲跌 % 區間</label><div class="row2"><input id="r20Min" type="number" placeholder="最小">～<input id="r20Max" type="number" placeholder="最大"></div>
+    <label>ADX ≥（&gt;25 代表有趨勢）</label><input id="adx" type="number" min="0" placeholder="不限">
+    <div id="flags"></div>
+  </details>
+  <p style="margin-top:14px"><button id="reset">重設條件</button></p>
+</aside>
+
+<section>
+  <div id="chartBox" class="card" hidden>
+    <div class="chartHead">
+      <h2 id="chartTitle"></h2>
+      <div class="inline" style="align-items:center">
+        <select id="sub"></select>
+        <label class="chk"><input type="checkbox" id="bb">布林通道</label>
+        <button id="closeChart">關閉</button>
+      </div>
+    </div>
+    <div id="chart"></div>
+  </div>
+  <div class="card">
+    <p id="count"></p>
+    <div class="tablewrap"><table><thead id="thead"></thead><tbody id="tbody"></tbody></table></div>
+  </div>
+</section>
+</div>
+
+<script>
+"use strict";
+// ------------------------------------------------------------------ 設定
+const FLAGS = [
+  ["均線", [["ma_bull","均線多頭排列（5>20>60）"],["above_ma20","站上月線 MA20"],["above_ma60","站上季線 MA60"],
+           ["above_ma120","站上半年線"],["above_ma240","站上年線"],["ma_tangle","均線糾結"]]],
+  ["動能", [["kd_golden","KD 今日黃金交叉"],["kd_low_gold","KD 低檔(<30)黃金交叉"],["macd_golden","MACD 今日黃金交叉"],
+           ["macd_pos","DIF 在 MACD 之上"],["dmi_bull","+DI > -DI"],["obv_up","OBV 在 20 日均線上"]]],
+  ["型態／量能", [["breakout20","突破前 20 日高點"],["near_high52","距 52 週高 5% 內"],["bb_squeeze","布林收斂"],
+           ["bb_up_break","突破布林上軌"],["bb_dn_break","跌破布林下軌"],["up3","連 3 日收紅"],["vol_expand","5日均量 > 20日均量"]]]
+];
+const desc = (a,b) => (x,y) => cmpNum(y[a],x[a]) || (b ? cmpNum(y[b],x[b]) : 0);
+const PRESETS = {
+  none:    {name:"（不使用）", desc:"不套用策略，只用左邊條件篩選。點表格任一列看線圖。"},
+  bottom:  {name:"低檔轉強",
+    desc:"前提：距 60 日低點 15% 內，且在季線下或 60 日跌幅 >10%，近 10 日 RSI 曾 <35 或近 5 日 K 曾 <25。訊號至少 2 個：KD 低檔金叉、MACD 綠柱縮短、站回 5 日線、帶量紅K、RSI 脫離 30、OBV 翻揚。",
+    base:r => r.low60_dist<=15 && (r.above_ma60===false || r.ret60<-10) && (r.rsi_min10<35 || r.k_min5<25),
+    sigs:[["KD低檔金叉",r=>r.kd_golden===true && r.K<40],["MACD綠柱縮短",r=>r.hist_prev<0 && r.hist>r.hist_prev],
+          ["站回5日線",r=>r.reclaim_ma5===true],["帶量紅K",r=>r.red===true && r.vol_ratio>=1.2],
+          ["RSI脫離超賣",r=>r.rsi_prev<=30 && r.rsi>30],["OBV翻揚",r=>r.obv_up===true]],
+    min:2, sort:desc("score","vol_ratio")},
+  daytrade:{name:"當沖候選",
+    desc:"前提：20 日均量 ≥ 3,000 張、均成交值 ≥ 3 億、股價 20–1,000 元、20 日平均振幅 ≥ 3%。加分：振幅 ≥5%、ATR% 3–8、今日量增、今日漲跌 ≥3%、ADX ≥25。※ 下單前請確認可現股當沖、非處置/注意股。",
+    base:r => r.vma20_lots>=3000 && r.turnover20>=3 && r.close>=20 && r.close<=1000 && r.amp20>=3,
+    sigs:[["振幅≥5%",r=>r.amp20>=5],["ATR%適中",r=>r.atr_pct>=3 && r.atr_pct<=8],["今日量增",r=>r.vol_ratio>=1.3],
+          ["今日波動大",r=>Math.abs(r.chg_pct)>=3],["趨勢明確",r=>r.adx>=25]],
+    min:0, sort:desc("score","amp20")},
+  breakout:{name:"量價突破",
+    desc:"前提：收盤突破前 20 日高點、量比 ≥1.5、收紅K。加分：均線多頭、ADX ≥20、近 52 週高、OBV 走強、MACD 多方。",
+    base:r => r.breakout20===true && r.vol_ratio>=1.5 && r.red===true,
+    sigs:[["均線多頭",r=>r.ma_bull===true],["ADX≥20",r=>r.adx>=20],["近52週高",r=>r.near_high52===true],
+          ["OBV走強",r=>r.obv_up===true],["MACD多方",r=>r.macd_pos===true]],
+    min:0, sort:desc("score","vol_ratio")},
+  pullback:{name:"多頭回檔",
+    desc:"前提：月線 > 季線且季線上揚、乖離率 -3%～+2%、K < 50。加分：守住月線、回檔量縮、KD 金叉、MACD 柱轉強、收紅K。",
+    base:r => r.trend_up===true && r.bias20>=-3 && r.bias20<=2 && r.K<50,
+    sigs:[["守住月線",r=>r.above_ma20===true],["回檔量縮",r=>r.vol_expand===false],["KD金叉",r=>r.kd_golden===true],
+          ["MACD柱轉強",r=>r.hist>r.hist_prev],["收紅K",r=>r.red===true]],
+    min:0, sort:(x,y)=>cmpNum(y.score,x.score) || cmpNum(x.bias20,y.bias20)},
+  squeeze: {name:"布林收斂待發",
+    desc:"前提：布林帶寬接近 120 日低點。加分：量能放大、MACD 多方、站上中軌、收紅K。",
+    base:r => r.bb_squeeze===true,
+    sigs:[["量能放大",r=>r.vol_expand===true],["MACD多方",r=>r.macd_pos===true],["站上中軌",r=>r.bb_pos>0.5],["收紅K",r=>r.red===true]],
+    min:0, sort:desc("score","vol_ratio")}
+};
+const SUBS = ["KD","RSI","MACD","DMI","OBV","W%R","CCI","MFI","乖離率"];
+const COLS = [
+  {k:"code",t:"代號",l:1},{k:"name",t:"名稱",l:1},{k:"market",t:"市場",l:1},{k:"industry",t:"產業",l:1},
+  {k:"score",t:"訊號數",preset:1},{k:"reason",t:"符合訊號",preset:1,cls:"reason"},
+  {k:"close",t:"收盤",d:2},{k:"chg_pct",t:"漲跌%",d:2,sign:1},{k:"vol_lots",t:"量(張)",d:0},{k:"vol_ratio",t:"量比",d:2},
+  {k:"ret20",t:"20日%",d:1,sign:1},{k:"rsi",t:"RSI",d:1},{k:"K",t:"K",d:1},{k:"D",t:"D",d:1},
+  {k:"bias20",t:"乖離%",d:1,sign:1},{k:"adx",t:"ADX",d:1},{k:"amp20",t:"振幅20%",d:1},{k:"turnover20",t:"均值(億)",d:1}
+];
+const MAX_ROWS = 300;
+
+// ------------------------------------------------------------------ 工具
+const $ = id => document.getElementById(id);
+const isNum = v => typeof v === "number" && !Number.isNaN(v);
+function cmpNum(a,b){ const A=isNum(a),B=isNum(b); if(!A&&!B) return 0; if(!A) return 1; if(!B) return -1; return a-b; }
+function cmpAny(a,b){ return (typeof a==="string"||typeof b==="string") ? String(a??"").localeCompare(String(b??""),"zh-Hant") : cmpNum(a,b); }
+function val(id){ const v=$(id).value.trim(); return v==="" ? null : Number(v); }
+function fmt(v,d){ return isNum(v) ? v.toLocaleString("zh-TW",{minimumFractionDigits:d,maximumFractionDigits:d}) : "–"; }
+
+let DATA=[], META={}, sortKey=null, sortDir=-1, current=null, lastRows=[];
+
+// ------------------------------------------------------------------ 初始化
+fetch("data/snapshot.json?t="+Date.now()).then(r=>{ if(!r.ok) throw new Error(r.status); return r.json(); }).then(j=>{
+  META=j;
+  DATA=j.rows.map(r=>{ for(const k in r) if(r[k]===null && !/^(code|name|market|industry|date)$/.test(k)) r[k]=NaN; return r; });
+  $("status").textContent = `資料日期 ${j.last_date}｜更新於 ${j.updated}｜${j.n_rows} 檔`+(j.n_stale?`（${j.n_stale} 檔資料較舊）`:"");
+  [...new Set(DATA.map(r=>r.industry))].sort((a,b)=>a.localeCompare(b,"zh-Hant")).forEach(i=>$("ind").add(new Option(i,i)));
+  render();
+}).catch(e=>{ $("status").textContent="讀不到資料（"+e.message+"）：請確認 GitHub Actions 已成功執行過一次。"; });
+
+for(const [k,p] of Object.entries(PRESETS)) $("preset").add(new Option(p.name,k));
+SUBS.forEach(s=>$("sub").add(new Option("副圖："+s,s)));
+$("flags").innerHTML = FLAGS.map(([g,items])=>`<fieldset><legend>${g}</legend>`+
+  items.map(([k,t])=>`<label class="chk"><input type="checkbox" class="flag" value="${k}">${t}</label>`).join("")+"</fieldset>").join("");
+
+document.querySelector("aside").addEventListener("input", ()=>{ sortKey=null; render(); });
+$("reset").onclick = ()=>{
+  document.querySelectorAll("aside input[type=number]:not(#minvol), aside input[type=search]").forEach(i=>i.value="");
+  $("minvol").value=500; $("preset").value="none"; $("ind").value="";
+  document.querySelectorAll(".flag").forEach(c=>c.checked=false);
+  document.querySelectorAll("input[name=mkt]").forEach(c=>c.checked=true);
+  sortKey=null; render();
+};
+$("sub").onchange = $("bb").onchange = ()=> current && drawChart(current.code, current.name);
+$("closeChart").onclick = ()=>{ $("chartBox").hidden=true; current=null; };
+
+// ------------------------------------------------------------------ 篩選
+function filterRows(){
+  const mk=[...document.querySelectorAll("input[name=mkt]:checked")].map(c=>c.value);
+  const ind=$("ind").value, minvol=val("minvol")??0, q=$("q").value.trim().toLowerCase();
+  const rng=[["rsi","rsiMin","rsiMax"],["K","kMin","kMax"],["ret20","r20Min","r20Max"]];
+  const vr=val("vr"), adx=val("adx");
+  const flags=[...document.querySelectorAll(".flag:checked")].map(c=>c.value);
+  let rows = DATA.filter(r=>{
+    if(!mk.includes(r.market)) return false;
+    if(ind && r.industry!==ind) return false;
+    if(q && !(r.code.includes(q) || r.name.toLowerCase().includes(q))) return false;
+    if(!(r.vol_lots>=minvol)) return false;
+    if(vr!==null && !(r.vol_ratio>=vr)) return false;
+    if(adx!==null && !(r.adx>=adx)) return false;
+    for(const [k,a,b] of rng){ const lo=val(a), hi=val(b);
+      if(lo!==null && !(r[k]>=lo)) return false; if(hi!==null && !(r[k]<=hi)) return false; }
+    for(const f of flags) if(r[f]!==true) return false;
+    return true;
+  });
+  const p = PRESETS[$("preset").value];
+  $("presetDesc").textContent = p.desc;
+  if(p.base){
+    rows = rows.filter(r=>p.base(r)===true).map(r=>{
+      const hit=p.sigs.filter(([,f])=>f(r)===true).map(([t])=>t);
+      return {...r, score:hit.length, reason:hit.join("、")};
+    }).filter(r=>r.score>=p.min).sort(p.sort);
+  } else rows.sort(desc("vol_ratio"));
+  if(sortKey) rows.sort((a,b)=>sortDir*cmpAny(a[sortKey],b[sortKey]));
+  return rows;
+}
+
+function render(){
+  if(!DATA.length) return;
+  const rows=filterRows(), presetOn=$("preset").value!=="none";
+  const cols=COLS.filter(c=>!c.preset||presetOn);
+  lastRows=rows;
+  $("count").textContent=`符合條件：${rows.length} 檔`+(rows.length>MAX_ROWS?`（只顯示前 ${MAX_ROWS} 檔）`:"")+"　點任一列看線圖，點欄位標題可排序";
+  $("thead").innerHTML="<tr>"+cols.map(c=>`<th class="${c.l?"l":""}" data-k="${c.k}">${c.t}${sortKey===c.k?(sortDir>0?" ▲":" ▼"):""}</th>`).join("")+"</tr>";
+  $("tbody").innerHTML=rows.slice(0,MAX_ROWS).map((r,i)=>`<tr data-i="${i}" class="${current&&current.code===r.code?"sel":""}">`+cols.map(c=>{
+    let v=r[c.k], cls=c.cls||(c.l?"l":"");
+    if(c.d!==undefined){ if(c.sign&&isNum(v)) cls+=v>0?" pos":v<0?" neg":""; v=fmt(v,c.d); }
+    if(c.k==="name" && r.date<META.last_date) v+=` <span class="stale" title="資料停在 ${r.date}">*</span>`;
+    return `<td class="${cls}">${v??""}</td>`;
+  }).join("")+"</tr>").join("");
+}
+
+$("thead").addEventListener("click",e=>{
+  const k=e.target.closest("th")?.dataset.k; if(!k) return;
+  if(sortKey===k) sortDir=-sortDir; else { sortKey=k; sortDir=["code","name","market","industry"].includes(k)?1:-1; }
+  render();
+});
+$("tbody").addEventListener("click",e=>{
+  const tr=e.target.closest("tr"); if(!tr) return;
+  const r=lastRows[+tr.dataset.i]; current={code:r.code,name:r.name};
+  document.querySelectorAll("#tbody tr.sel").forEach(x=>x.classList.remove("sel")); tr.classList.add("sel");
+  drawChart(r.code,r.name);
+});
+
+// ------------------------------------------------------------------ 線圖
+const cache={};
+async function drawChart(code,name){
+  $("chartBox").hidden=false; $("chartTitle").textContent=`${code} ${name}`;
+  $("chartBox").scrollIntoView({behavior:"smooth",block:"start"});
+  let p=cache[code];
+  if(!p){ try{ p=cache[code]=await (await fetch(`data/px/${code}.json`)).json(); }
+          catch(e){ $("chart").textContent="讀不到線圖資料"; return; } }
+  const x=p.d, UP="#d32f2f", DN="#2e7d32";
+  const line=(y,name,color,yaxis,extra={})=>({type:"scatter",mode:"lines",x,y,name,yaxis,line:{width:1.2,color},hoverinfo:"y+name",...extra});
+  const ref=(v,yaxis)=>({type:"scatter",mode:"lines",x,y:x.map(()=>v),yaxis,showlegend:false,hoverinfo:"skip",line:{width:1,dash:"dot",color:"#9e9e9e"}});
+  const tr=[
+    {type:"candlestick",x,open:p.o,high:p.h,low:p.l,close:p.c,name:"K線",increasing:{line:{color:UP},fillcolor:UP},decreasing:{line:{color:DN},fillcolor:DN}},
+    line(p.ma5,"MA5","#f9a825","y"), line(p.ma10,"MA10","#8d6e63","y"), line(p.ma20,"月線","#1565c0","y"), line(p.ma60,"季線","#6a1b9a","y"),
+    line(p.ma120,"半年線","#00897b","y",{visible:"legendonly"}), line(p.ma240,"年線","#616161","y",{visible:"legendonly"}),
+    {type:"bar",x,y:p.v,name:"量(張)",yaxis:"y2",marker:{color:p.c.map((c,i)=>c>=p.o[i]?UP:DN)}}
+  ];
+  if($("bb").checked) tr.push(line(p.up,"布林上軌","#90a4ae","y",{line:{dash:"dash",width:1,color:"#90a4ae"}}), line(p.dn,"布林下軌","#90a4ae","y",{line:{dash:"dash",width:1,color:"#90a4ae"}}));
+  const s=$("sub").value, Y="y3"; let range=null;
+  if(s==="KD"){ tr.push(line(p.K,"K","#ef6c00",Y),line(p.D,"D","#00838f",Y),ref(20,Y),ref(80,Y)); range=[0,100]; }
+  if(s==="RSI"){ tr.push(line(p.rsi,"RSI14","#6a1b9a",Y),ref(30,Y),ref(70,Y)); range=[0,100]; }
+  if(s==="MACD"){ const h=p.dif.map((d,i)=>d==null||p.macd[i]==null?null:+(d-p.macd[i]).toFixed(3));
+    tr.push({type:"bar",x,y:h,name:"柱狀體",yaxis:Y,marker:{color:h.map(v=>v>=0?UP:DN)}},line(p.dif,"DIF","#1565c0",Y),line(p.macd,"MACD","#ef6c00",Y)); }
+  if(s==="DMI"){ tr.push(line(p.pdi,"+DI",UP,Y),line(p.mdi,"-DI",DN,Y),line(p.adx,"ADX","#212121",Y),ref(25,Y)); }
+  if(s==="OBV"){ tr.push(line(p.obv,"OBV(千張)","#1565c0",Y),line(p.obv_ma20,"OBV MA20","#ef6c00",Y)); }
+  if(s==="W%R"){ tr.push(line(p.wr,"W%R","#00838f",Y),ref(-20,Y),ref(-80,Y)); range=[-100,0]; }
+  if(s==="CCI"){ tr.push(line(p.cci,"CCI","#5d4037",Y),ref(100,Y),ref(-100,Y)); }
+  if(s==="MFI"){ tr.push(line(p.mfi,"MFI","#ad1457",Y),ref(20,Y),ref(80,Y)); range=[0,100]; }
+  if(s==="乖離率"){ tr.push(line(p.bias20,"乖離20%","#455a64",Y),ref(0,Y)); }
+  const dark=matchMedia("(prefers-color-scheme: dark)").matches, fg=dark?"#e6e9ef":"#1d2330", grid=dark?"#2b313c":"#eceff3";
+  const ax=(dom,extra={})=>({domain:dom,gridcolor:grid,zeroline:false,fixedrange:false,...extra});
+  Plotly.react("chart",tr,{
+    margin:{l:50,r:20,t:10,b:40}, paper_bgcolor:"rgba(0,0,0,0)", plot_bgcolor:"rgba(0,0,0,0)", font:{color:fg,size:12},
+    hovermode:"x unified", showlegend:true, legend:{orientation:"h",y:1.06},
+    xaxis:{type:"category",rangeslider:{visible:false},nticks:8,gridcolor:grid,showspikes:true},
+    yaxis:ax([0.46,1],{title:"股價"}), yaxis2:ax([0.28,0.42],{title:"張"}),
+    yaxis3:ax([0,0.24],{title:s,...(range?{range}:{})}),
+    bargap:0.2
+  },{responsive:true,displaylogo:false});
+}
+</script>
+</body>
+</html>
