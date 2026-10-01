@@ -102,8 +102,18 @@ const FLAGS = [
   ["動能", [["kd_golden","KD 今日黃金交叉"],["kd_low_gold","KD 低檔(<30)黃金交叉"],["macd_golden","MACD 今日黃金交叉"],
            ["macd_pos","DIF 在 MACD 之上"],["dmi_bull","+DI > -DI"],["obv_up","OBV 在 20 日均線上"]]],
   ["型態／量能", [["breakout20","突破前 20 日高點"],["near_high52","距 52 週高 5% 內"],["bb_squeeze","布林收斂"],
-           ["bb_up_break","突破布林上軌"],["bb_dn_break","跌破布林下軌"],["up3","連 3 日收紅"],["vol_expand","5日均量 > 20日均量"]]]
+           ["bb_up_break","突破布林上軌"],["bb_dn_break","跌破布林下軌"],["up3","連 3 日收紅"],["vol_expand","5日均量 > 20日均量"]]],
+  ["籌碼", [["c_f_buy","外資今日買超"],["c_t_buy","投信今日買超"],["c_all_buy","三大法人今日同步買超"],
+           ["c_f_streak","外資連買 ≥ 3 日"],["c_t_streak","投信連買 ≥ 3 日"],["c_tot5","法人 5 日合計買超"],
+           ["c_m_down","融資今日減少"],["c_m_down5","融資 5 日減少"],["c_ms20","券資比 ≥ 20%"]]]
 ];
+// 籌碼旗標：由數值欄位推出（資料缺漏時為 undefined → 不符合）
+function chipFlags(r){
+  r.c_f_buy = r.f1>0; r.c_t_buy = r.t1>0; r.c_all_buy = r.f1>0 && r.t1>0 && r.d1>0;
+  r.c_f_streak = r.f_streak>=3; r.c_t_streak = r.t_streak>=3; r.c_tot5 = r.tot5>0;
+  r.c_m_down = r.m_chg<0; r.c_m_down5 = r.m_chg5<0; r.c_ms20 = r.ms_ratio>=20;
+  return r;
+}
 const desc = (a,b) => (x,y) => cmpNum(y[a],x[a]) || (b ? cmpNum(y[b],x[b]) : 0);
 const PRESETS = {
   none:    {name:"（不使用）", desc:"不套用策略，只用左邊條件篩選。點表格任一列看線圖。"},
@@ -124,26 +134,40 @@ const PRESETS = {
     desc:"前提：收盤突破前 20 日高點、量比 ≥1.5、收紅K。加分：均線多頭、ADX ≥20、近 52 週高、OBV 走強、MACD 多方。",
     base:r => r.breakout20===true && r.vol_ratio>=1.5 && r.red===true,
     sigs:[["均線多頭",r=>r.ma_bull===true],["ADX≥20",r=>r.adx>=20],["近52週高",r=>r.near_high52===true],
-          ["OBV走強",r=>r.obv_up===true],["MACD多方",r=>r.macd_pos===true]],
+          ["OBV走強",r=>r.obv_up===true],["MACD多方",r=>r.macd_pos===true],["法人買超",r=>r.tot1>0]],
     min:0, sort:desc("score","vol_ratio")},
   pullback:{name:"多頭回檔",
     desc:"前提：月線 > 季線且季線上揚、乖離率 -3%～+2%、K < 50。加分：守住月線、回檔量縮、KD 金叉、MACD 柱轉強、收紅K。",
     base:r => r.trend_up===true && r.bias20>=-3 && r.bias20<=2 && r.K<50,
     sigs:[["守住月線",r=>r.above_ma20===true],["回檔量縮",r=>r.vol_expand===false],["KD金叉",r=>r.kd_golden===true],
-          ["MACD柱轉強",r=>r.hist>r.hist_prev],["收紅K",r=>r.red===true]],
+          ["MACD柱轉強",r=>r.hist>r.hist_prev],["收紅K",r=>r.red===true],["法人5日買超",r=>r.tot5>0]],
     min:0, sort:(x,y)=>cmpNum(y.score,x.score) || cmpNum(x.bias20,y.bias20)},
   squeeze: {name:"布林收斂待發",
     desc:"前提：布林帶寬接近 120 日低點。加分：量能放大、MACD 多方、站上中軌、收紅K。",
     base:r => r.bb_squeeze===true,
     sigs:[["量能放大",r=>r.vol_expand===true],["MACD多方",r=>r.macd_pos===true],["站上中軌",r=>r.bb_pos>0.5],["收紅K",r=>r.red===true]],
-    min:0, sort:desc("score","vol_ratio")}
+    min:0, sort:desc("score","vol_ratio")},
+  trust:   {name:"投信認養",
+    desc:"前提：投信連續買超 ≥ 3 日，且 5 日合計買超。加分：站上月線、均線多頭、外資 5 日也買超、融資 5 日減少、量能放大。",
+    base:r => r.t_streak>=3 && r.t5>0,
+    sigs:[["站上月線",r=>r.above_ma20===true],["均線多頭",r=>r.ma_bull===true],["外資同買",r=>r.f5>0],
+          ["融資減少",r=>r.m_chg5<0],["量能放大",r=>r.vol_expand===true]],
+    min:0, sort:desc("score","t5")},
+  chips:   {name:"法人買、散戶退",
+    desc:"前提：三大法人 5 日合計買超，且融資 5 日減少（籌碼從散戶流向法人）。加分：外資 5 日買超、投信 5 日買超、站上月線、MACD 多方、今日三大法人同買。",
+    base:r => r.tot5>0 && r.m_chg5<0,
+    sigs:[["外資5日買",r=>r.f5>0],["投信5日買",r=>r.t5>0],["站上月線",r=>r.above_ma20===true],
+          ["MACD多方",r=>r.macd_pos===true],["法人今日同買",r=>r.c_all_buy===true]],
+    min:0, sort:desc("score","tot5")}
 };
-const SUBS = ["KD","RSI","MACD","DMI","OBV","W%R","CCI","MFI","乖離率"];
+const SUBS = ["KD","RSI","MACD","法人買賣超","融資融券","DMI","OBV","W%R","CCI","MFI","乖離率"];
 const COLS = [
   {k:"code",t:"代號",l:1},{k:"name",t:"名稱",l:1},{k:"market",t:"市場",l:1},{k:"industry",t:"產業",l:1},
   {k:"score",t:"訊號數",preset:1},{k:"reason",t:"符合訊號",preset:1,cls:"reason"},
   {k:"close",t:"收盤",d:2},{k:"chg_pct",t:"漲跌%",d:2,sign:1},{k:"vol_lots",t:"量(張)",d:0},{k:"vol_ratio",t:"量比",d:2},
   {k:"ret20",t:"20日%",d:1,sign:1},{k:"rsi",t:"RSI",d:1},{k:"K",t:"K",d:1},{k:"D",t:"D",d:1},
+  {k:"f1",t:"外資(張)",d:0,sign:1},{k:"t1",t:"投信(張)",d:0,sign:1},{k:"d1",t:"自營(張)",d:0,sign:1},
+  {k:"tot5",t:"法人5日",d:0,sign:1},{k:"t_streak",t:"投信連",d:0,sign:1},{k:"m_chg",t:"資增減",d:0,sign:1},{k:"ms_ratio",t:"券資比%",d:1},
   {k:"bias20",t:"乖離%",d:1,sign:1},{k:"adx",t:"ADX",d:1},{k:"amp20",t:"振幅20%",d:1},{k:"turnover20",t:"均值(億)",d:1}
 ];
 const MAX_ROWS = 300;
@@ -161,8 +185,8 @@ let DATA=[], META={}, sortKey=null, sortDir=-1, current=null, lastRows=[];
 // ------------------------------------------------------------------ 初始化
 fetch("data/snapshot.json?t="+Date.now()).then(r=>{ if(!r.ok) throw new Error(r.status); return r.json(); }).then(j=>{
   META=j;
-  DATA=j.rows.map(r=>{ for(const k in r) if(r[k]===null && !/^(code|name|market|industry|date)$/.test(k)) r[k]=NaN; return r; });
-  $("status").textContent = `資料日期 ${j.last_date}｜更新於 ${j.updated}｜${j.n_rows} 檔`+(j.n_stale?`（${j.n_stale} 檔資料較舊）`:"");
+  DATA=j.rows.map(r=>{ for(const k in r) if(r[k]===null && !/^(code|name|market|industry|date|inst_date|margin_date)$/.test(k)) r[k]=NaN; return chipFlags(r); });
+  $("status").textContent = `股價 ${j.last_date}｜法人 ${j.inst_date||"–"}｜資券 ${j.margin_date||"–"}｜更新於 ${j.updated}｜${j.n_rows} 檔`+(j.n_stale?`（${j.n_stale} 檔股價較舊）`:"");
   [...new Set(DATA.map(r=>r.industry))].sort((a,b)=>a.localeCompare(b,"zh-Hant")).forEach(i=>$("ind").add(new Option(i,i)));
   render();
 }).catch(e=>{ $("status").textContent="讀不到資料（"+e.message+"）：請確認 GitHub Actions 已成功執行過一次。"; });
@@ -264,6 +288,12 @@ async function drawChart(code,name){
   if(s==="RSI"){ tr.push(line(p.rsi,"RSI14","#6a1b9a",Y),ref(30,Y),ref(70,Y)); range=[0,100]; }
   if(s==="MACD"){ const h=p.dif.map((d,i)=>d==null||p.macd[i]==null?null:+(d-p.macd[i]).toFixed(3));
     tr.push({type:"bar",x,y:h,name:"柱狀體",yaxis:Y,marker:{color:h.map(v=>v>=0?UP:DN)}},line(p.dif,"DIF","#1565c0",Y),line(p.macd,"MACD","#ef6c00",Y)); }
+  if(s==="法人買賣超"){ if(!p.fi){ tr.push(ref(0,Y)); } else {
+    tr.push({type:"bar",x,y:p.fi,name:"外資",yaxis:Y,marker:{color:"#1565c0"}},
+            {type:"bar",x,y:p.ti,name:"投信",yaxis:Y,marker:{color:"#ef6c00"}},
+            {type:"bar",x,y:p.di,name:"自營商",yaxis:Y,marker:{color:"#8d6e63"}}); } }
+  if(s==="融資融券"){ if(p.mb){ tr.push(line(p.mb,"融資餘額(張)","#d32f2f",Y,{connectgaps:true}),
+                                       line(p.sb,"融券餘額(張)","#2e7d32","y4",{connectgaps:true})); } else tr.push(ref(0,Y)); }
   if(s==="DMI"){ tr.push(line(p.pdi,"+DI",UP,Y),line(p.mdi,"-DI",DN,Y),line(p.adx,"ADX","#212121",Y),ref(25,Y)); }
   if(s==="OBV"){ tr.push(line(p.obv,"OBV(千張)","#1565c0",Y),line(p.obv_ma20,"OBV MA20","#ef6c00",Y)); }
   if(s==="W%R"){ tr.push(line(p.wr,"W%R","#00838f",Y),ref(-20,Y),ref(-80,Y)); range=[-100,0]; }
@@ -277,8 +307,9 @@ async function drawChart(code,name){
     hovermode:"x unified", showlegend:true, legend:{orientation:"h",y:1.06},
     xaxis:{type:"category",rangeslider:{visible:false},nticks:8,gridcolor:grid,showspikes:true},
     yaxis:ax([0.46,1],{title:"股價"}), yaxis2:ax([0.28,0.42],{title:"張"}),
-    yaxis3:ax([0,0.24],{title:s,...(range?{range}:{})}),
-    bargap:0.2
+    yaxis3:ax([0,0.24],{title:s==="法人買賣超"?"張":s==="融資融券"?"融資(張)":s,...(range?{range}:{})}),
+    yaxis4:{overlaying:"y3",side:"right",showgrid:false,zeroline:false,title:s==="融資融券"?"融券(張)":""},
+    barmode:"relative", bargap:0.2
   },{responsive:true,displaylogo:false});
 }
 </script>
