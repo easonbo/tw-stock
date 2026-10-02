@@ -581,6 +581,8 @@ def snapshot(df, x):
         ma20_s=_pct(wslope(x["ma20"]), close), ma60_s=_pct(wslope(x["ma60"]), close),
         ma20_s_prev=_pct(wslope(x["ma20"], end=5), close),
         bbw_s=wslope(x["bbw"]), bbw60_s=wslope(x["bbw60"]),
+        # ---- 布林上軌近 3 日斜率：上軌 U(t-2), U(t-1), U(t) → 兩段斜率取平均（元／日；另換算 %／日）
+        **upper_slope3(x["up"], x["ma20"], close),
         # ---- 當沖：CDP 逆勢操作價位（以今日高低收推算下一個交易日）
         **cdp_levels(num(df["High"].iloc[-1]), num(df["Low"].iloc[-1]), close),
         day_pos=num((close - df["Low"].iloc[-1]) / (df["High"].iloc[-1] - df["Low"].iloc[-1]))
@@ -590,8 +592,19 @@ def snapshot(df, x):
         vma20_lots=num(x["vma20"].iloc[-1] / 1000),
         turnover20=num((c * df["Volume"]).tail(20).mean() / 1e8),
     )
-    return {k: (round(v, 3) if isinstance(v, float) else (bool(v) if isinstance(v, (bool, np.bool_)) else v))
+    return {k: (round(v, 4 if k.startswith("bb_up") else 3) if isinstance(v, float) else (bool(v) if isinstance(v, (bool, np.bool_)) else v))
             for k, v in s.items()}
+
+def upper_slope3(up, mid, close):
+    u = up.tail(3).to_numpy(dtype=float); m = mid.tail(3).to_numpy(dtype=float)
+    if len(u) < 3 or np.isnan(u).any() or np.isnan(m).any():
+        return dict(bb_up=None, bb_up_s1=None, bb_up_s2=None, bb_up_s3=None, bb_up_s3_pct=None, ma20_nodown3=None)
+    s1, s2 = u[1] - u[0], u[2] - u[1]
+    avg = (s1 + s2) / 2
+    dm = np.diff(m)
+    return dict(bb_up=round(float(u[2]), 4), bb_up_s1=float(s1), bb_up_s2=float(s2), bb_up_s3=float(avg),
+                bb_up_s3_pct=float(avg / close * 100) if close else None,
+                ma20_nodown3=bool((dm >= 0).all()))            # 近 3 日月線（中軌）沒有遞減
 
 def _pct(v, close):
     return None if v is None or not close else v / close * 100
