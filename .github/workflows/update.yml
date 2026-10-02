@@ -2,7 +2,8 @@ name: 每日更新台股資料
 
 on:
   schedule:
-    - cron: "30 7 * * 1-5"      # 台灣時間 15:30：股價
+    - cron: "*/30 1-5 * * 1-5"  # 台灣時間 9:00–13:30 每 30 分鐘：盤中股價
+    - cron: "30 7 * * 1-5"      # 台灣時間 15:30：收盤股價
     - cron: "30 8 * * 1-5"      # 台灣時間 16:30：補三大法人
     - cron: "30 9 * * 1-5"      # 台灣時間 17:30：再補一次三大法人
     - cron: "40 13 * * 1-5"     # 台灣時間 21:40：補融資融券
@@ -39,6 +40,8 @@ jobs:
           restore-keys: hist-
       - name: 下載價量並計算指標
         run: python update.py
+        env:
+          INTRADAY: ${{ github.event.schedule == '*/30 1-5 * * 1-5' && '1' || '0' }}
       - name: 儲存歷史價量快取
         if: always()
         uses: actions/cache/save@v4
