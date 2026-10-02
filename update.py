@@ -24,6 +24,7 @@ CACHE = os.path.join(ROOT, "cache")
 OUT   = os.path.join(ROOT, "site", "data")
 PXDIR = os.path.join(OUT, "px")
 TEST  = os.environ.get("TEST_MODE") == "1"
+INTRADAY = os.environ.get("INTRADAY") == "1"          # 盤中模式：只更新股價，籌碼沿用快取
 TZ    = ZoneInfo("Asia/Taipei")
 KEEP_ROWS, CHART_ROWS, MIN_ROWS = 320, 250, 80
 
@@ -38,21 +39,32 @@ IND_MAP = {
   "35":"綠能環保","36":"數位雲端","37":"運動休閒","38":"居家生活",
 }
 
+def to_num(x):
+    try:
+        return float(str(x).replace(",", "").strip())
+    except (TypeError, ValueError):
+        return np.nan
+
 # --------------------------------------------------------------------------- 清單
+SHARES_COL = "已發行普通股數或TDR原股發行股數"
+
 def _clean(rows, market):
     out = []
-    for code, name, ind in rows:
+    for row in rows:
+        code, name, ind = row[:3]
+        shares = to_num(row[3]) if len(row) > 3 else np.nan
         code = str(code).strip()
         if not re.fullmatch(r"[1-9]\d{3}", code):      # 只留一般股
             continue
         ind = str(ind).strip().zfill(2)
-        out.append(dict(code=code, name=str(name).strip(), industry=IND_MAP.get(ind, ind), market=market))
+        out.append(dict(code=code, name=str(name).strip(), industry=IND_MAP.get(ind, ind), market=market,
+                        shares=None if np.isnan(shares) or shares <= 0 else shares))
     return out
 
 def fetch_tse():
     r = requests.get("https://openapi.twse.com.tw/v1/opendata/t187ap03_L", timeout=60)
     r.raise_for_status()
-    return _clean([(x["公司代號"], x["公司簡稱"], x["產業別"]) for x in r.json()], "上市")
+    return _clean([(x["公司代號"], x["公司簡稱"], x["產業別"], x.get(SHARES_COL)) for x in r.json()], "上市")
 
 def fetch_otc():
     r = requests.get("https://mopsfin.twse.com.tw/opendata/t187ap03_O.csv", timeout=60)
@@ -63,7 +75,8 @@ def fetch_otc():
         except UnicodeDecodeError:
             continue
     df = pd.read_csv(io.StringIO(txt), dtype=str)
-    return _clean(zip(df["公司代號"], df["公司簡稱"], df["產業別"]), "上櫃")
+    sh = df[SHARES_COL] if SHARES_COL in df.columns else [None] * len(df)
+    return _clean(list(zip(df["公司代號"], df["公司簡稱"], df["產業別"], sh)), "上櫃")
 
 def get_list():
     path = os.path.join(CACHE, "listed.json")
@@ -144,7 +157,7 @@ def update_history(listed):
     have = [c for c in tick if c in hist and len(hist[c]) >= MIN_ROWS]
     need = [c for c in tick if c not in have]
     print(f"增量更新 {len(have)} 檔，完整下載 {len(need)} 檔")
-    for codes, period in ((have, "1mo"), (need, "18mo")):
+    for codes, period in ((have, "5d" if INTRADAY else "1mo"), (need, "18mo")):
         if not codes:
             continue
         got = yf_download([tick[c] for c in codes], period=period)
@@ -169,13 +182,13 @@ TPEX_WWW = "https://www.tpex.org.tw/www/zh-tw"
 
 HOST_FAILS = {}                      # 連線失敗計數：同一網站連續失敗 3 次就停止本次請求
 
-def get_json(url, params):
+def get_json(url, params=None, timeout=30):
     host = url.split("/")[2]
     if HOST_FAILS.get(host, 0) >= 3:
         return None
     for attempt in range(2):
         try:
-            r = requests.get(url, params=params, headers=UA, timeout=30)
+            r = requests.get(url, params=params, headers=UA, timeout=timeout)
             if r.status_code == 200:
                 HOST_FAILS[host] = 0
                 try:
@@ -190,12 +203,6 @@ def get_json(url, params):
     if HOST_FAILS[host] >= 3:
         print(f"⚠ {host} 連續失敗，本次略過該網站的籌碼資料")
     return None
-
-def to_num(x):
-    try:
-        return float(str(x).replace(",", "").strip())
-    except (TypeError, ValueError):
-        return np.nan
 
 def _nz(x):
     return 0.0 if np.isnan(x) else x
@@ -296,7 +303,72 @@ def fake_chips(days, codes):
                 prev = bal[c]; bal[c] = max(0, prev + rng.normal(0, 200))
                 m[c] = [bal[c], prev, bal[c] * 0.1, prev * 0.1]
             ch["margin"][k][mkt] = m
+        ch.setdefault("warrant", {})[k] = {"tse": {c: [rng.uniform(0, 5e6) * (8 if rng.random() < .05 else 1),
+                                                       rng.uniform(0, 1e6)] for c in codes}}
     return ch
+
+# ---- 權證：證交所 OpenAPI t187ap37_L（基本資料：權證→標的）、t187ap42_L（每日成交：最新一日）
+OPENAPI = "https://openapi.twse.com.tw/v1"
+
+def _iso(d):
+    d = re.sub(r"\D", "", str(d or ""))
+    if len(d) == 7:
+        d = str(int(d[:3]) + 1911) + d[3:]
+    return f"{d[:4]}-{d[4:6]}-{d[6:8]}" if len(d) == 8 else None
+
+def warrant_map(listed):
+    """權證代號 → (標的代號, 'C' 認購 / 'P' 認售)，每週更新一次。"""
+    path = os.path.join(CACHE, "warrant_map.json")
+    if os.path.exists(path) and time.time() - os.path.getmtime(path) < 6 * 86400:
+        return json.load(open(path, encoding="utf-8"))
+    data = get_json(f"{OPENAPI}/opendata/t187ap37_L", timeout=180)
+    if not isinstance(data, list) or not data:
+        return json.load(open(path, encoding="utf-8")) if os.path.exists(path) else {}
+    by_name = {s["name"]: s["code"] for s in listed}
+    out = {}
+    for w in data:
+        under = str(w.get("標的證券/指數", "")).strip()
+        m = re.search(r"(?<!\d)(\d{4,6})(?!\d)", under)
+        code = m.group(1) if m else by_name.get(re.sub(r"[\s\d]", "", under))
+        if not code:
+            continue
+        kind = str(w.get("權證類型", "")) + str(w.get("類別", ""))
+        out[str(w.get("權證代號", "")).strip()] = [code, "P" if ("售" in kind or "熊" in kind) else "C"]
+    json.dump(out, open(path, "w", encoding="utf-8"))
+    print(f"權證基本資料：{len(out)} 檔可對應到標的")
+    return out
+
+def warrant_today(wmap):
+    """最新一日：{標的代號: [認購成交金額, 認售成交金額]}（元），回傳 (日期, 資料)。"""
+    data = get_json(f"{OPENAPI}/opendata/t187ap42_L", timeout=60)
+    if not isinstance(data, list) or not data:
+        return None, {}
+    day, agg = None, {}
+    for w in data:
+        info = wmap.get(str(w.get("權證代號", "")).strip())
+        if not info:
+            continue
+        day = day or _iso(w.get("交易日期"))
+        amt = to_num(w.get("成交金額"))
+        if np.isnan(amt):
+            continue
+        a = agg.setdefault(info[0], [0.0, 0.0])
+        a[0 if info[1] == "C" else 1] += amt
+    return day, agg
+
+def update_warrants(ch, listed):
+    if TEST:
+        return
+    try:
+        wmap = warrant_map(listed)
+        day, agg = warrant_today(wmap) if wmap else (None, {})
+        if day and agg:
+            ch.setdefault("warrant", {})[day] = {"tse": agg}
+            print(f"權證成交：{day}，{len(agg)} 檔標的有權證交易")
+        else:
+            print("⚠ 權證資料沒有更新")
+    except Exception as e:
+        print(f"⚠ 權證資料失敗：{e}")
 
 def update_chips(days, codes):
     if TEST:
@@ -307,6 +379,7 @@ def update_chips(days, codes):
     budget, fails = MAX_CHIP_REQ, 0
     for kind in CHIP_SOURCES:
         ch[kind] = {k: v for k, v in ch[kind].items() if k in keep}
+    ch["warrant"] = {k: v for k, v in ch.get("warrant", {}).items() if k in keep}
     for d in reversed(days):                          # 由新到舊回補，法人與資券交錯進行
         k = d.strftime("%Y-%m-%d")
         for kind, srcs in CHIP_SOURCES.items():
@@ -338,7 +411,7 @@ def merged(ch, kind):
     return {k: {**(v.get("tse") or {}), **(v.get("otc") or {})} for k, v in sorted(ch[kind].items())
             if v.get("tse") or v.get("otc")}
 
-def chip_stats(code, inst, marg, last_price_date):
+def chip_stats(code, inst, marg, last_price_date, shares=None, vol_lots=None, turnover=None, warr=None):
     s = {}
     idays = [k for k in inst if k <= last_price_date]
     rows = [inst[k].get(code) for k in idays]
@@ -358,6 +431,14 @@ def chip_stats(code, inst, marg, last_price_date):
                 sign = sg; k += 1
             return k * sign
         s["f_streak"], s["t_streak"] = streak(0), streak(1)
+        if shares:                                    # 買賣超佔已發行股數（‰，千分比）
+            lots = shares / 1000
+            for key in ("f1", "t1", "f5", "t5", "f20", "t20", "tot5"):
+                s[key + "_cap"] = s[key] / lots * 1000 if not np.isnan(s[key]) else np.nan
+        if vol_lots:                                  # 三大法人買賣超佔當日成交量 %
+            s["inst_vol_pct"] = last[3] / vol_lots * 100
+        prev = arr[-10:-5]
+        s["f5_prev"], s["t5_prev"] = ((float(np.nansum(prev[:, i])) if len(prev) else np.nan) for i in (0, 1))
     mdays = [k for k in marg if k <= last_price_date]
     mrows = [marg[k].get(code) for k in mdays]
     if mdays and mrows[-1] is not None:
@@ -366,6 +447,17 @@ def chip_stats(code, inst, marg, last_price_date):
                  ms_ratio=(sb / mb * 100) if mb and mb > 0 else None)
         back = [r for r in mrows[-5:] if r is not None]
         s["m_chg5"] = mb - back[0][1] if back else None
+    if warr:
+        wdays = [k for k in warr if k <= last_price_date]
+        if wdays:
+            cur = warr[wdays[-1]].get(code)
+            if cur is not None:
+                s.update(w_date=wdays[-1], w_call=cur[0] / 1e4, w_put=cur[1] / 1e4,     # 萬元
+                         w_pc=cur[1] / cur[0] if cur[0] > 0 else None,
+                         w_ratio=cur[0] / turnover * 100 if turnover else None)
+                hist = [warr[k].get(code, [0.0, 0.0])[0] for k in wdays[-11:-1]]
+                if len(hist) >= 3 and np.mean(hist) > 0:
+                    s["w_surge"] = cur[0] / np.mean(hist)
     return {k: (round(float(v), 2) if isinstance(v, (float, np.floating)) and not np.isnan(v)
                 else (None if isinstance(v, float) else v)) for k, v in s.items()}
 
@@ -415,6 +507,7 @@ def indicators(df):
     x["vma5"], x["vma20"] = v.rolling(5).mean(), v.rolling(20).mean()
     x["bias20"] = (c / x["ma20"] - 1) * 100
     x["bbw"] = (x["up"] - x["dn"]) / x["mid"] * 100
+    x["bbw60"] = 4 * c.rolling(60).std(ddof=0) / x["ma60"] * 100            # 季線布林帶寬 %
     x["amp"] = (h - l) / pc * 100
     return x.replace([np.inf, -np.inf], np.nan)
 
@@ -433,6 +526,16 @@ def both(*xs):
     if any(x is False for x in xs): return False
     if any(x is None for x in xs): return None
     return True
+
+def wslope(series, end=0, n=5):
+    """近 n 日加權斜率：每日變化量以 1..n 加權（越近越重），end=5 表示往前推 5 天的窗口。"""
+    a = series.to_numpy(dtype=float)
+    stop = len(a) - end
+    seg = a[stop - n - 1: stop]
+    if len(seg) < n + 1 or np.isnan(seg).any():
+        return None
+    w = np.arange(1, n + 1)
+    return float((np.diff(seg) * w).sum() / w.sum())
 
 def snapshot(df, x):
     n = len(df); c = df["Close"]; L = lambda col, i=-1: num(x[col].iloc[i])
@@ -473,11 +576,37 @@ def snapshot(df, x):
         reclaim_ma5=both(gt(L("ma5", -2), C(-2)), gt(close, L("ma5"))),
         trend_up=both(gt(L("ma20"), L("ma60")), gt(L("ma60"), L("ma60", -21))),
         amp20=num(x["amp"].tail(20).mean()),
+        # ---- 均線／布林斜率（近 5 日加權，%／日；帶寬為百分點／日）
+        ma5_s=_pct(wslope(x["ma5"]), close), ma10_s=_pct(wslope(x["ma10"]), close),
+        ma20_s=_pct(wslope(x["ma20"]), close), ma60_s=_pct(wslope(x["ma60"]), close),
+        ma20_s_prev=_pct(wslope(x["ma20"], end=5), close),
+        bbw_s=wslope(x["bbw"]), bbw60_s=wslope(x["bbw60"]),
+        # ---- 當沖：CDP 逆勢操作價位（以今日高低收推算下一個交易日）
+        **cdp_levels(num(df["High"].iloc[-1]), num(df["Low"].iloc[-1]), close),
+        day_pos=num((close - df["Low"].iloc[-1]) / (df["High"].iloc[-1] - df["Low"].iloc[-1]))
+               if df["High"].iloc[-1] > df["Low"].iloc[-1] else 0.5,
+        # ---- 做多支撐：10日線、月線、10日低點中，位於股價下方且最接近者
+        **long_support(close, L("ma10"), L("ma20"), num(df["Low"].tail(10).min())),
         vma20_lots=num(x["vma20"].iloc[-1] / 1000),
         turnover20=num((c * df["Volume"]).tail(20).mean() / 1e8),
     )
     return {k: (round(v, 3) if isinstance(v, float) else (bool(v) if isinstance(v, (bool, np.bool_)) else v))
             for k, v in s.items()}
+
+def _pct(v, close):
+    return None if v is None or not close else v / close * 100
+
+def cdp_levels(h, l, c):
+    cdp = (h + l + 2 * c) / 4
+    return dict(cdp=cdp, ah=cdp + (h - l), nh=2 * cdp - l, nl=2 * cdp - h, al=cdp - (h - l))
+
+def long_support(close, ma10, ma20, low10):
+    cands = [(v, name) for v, name in ((ma10, "10日線"), (ma20, "月線"), (low10, "10日低點"))
+             if v is not None and v <= close]
+    if not cands:
+        return dict(sup=None, sup_name=None, sup_dist=None)
+    v, name = max(cands)
+    return dict(sup=v, sup_name=name, sup_dist=(close / v - 1) * 100)
 
 CHART_COLS = ["ma5","ma10","ma20","ma60","ma120","ma240","up","dn","K","D","rsi","dif","macd",
               "pdi","mdi","adx","obv","obv_ma20","wr","cci","mfi","bias20"]
@@ -508,16 +637,26 @@ def main():
     shutil.rmtree(PXDIR, ignore_errors=True); os.makedirs(PXDIR, exist_ok=True)
     if TEST:
         listed = [dict(code=str(1101 + i), name=f"測試{i}", industry=["半導體業", "航運業", "金融保險"][i % 3],
-                       market="上市" if i % 2 else "上櫃") for i in range(60)]
+                       market="上市" if i % 2 else "上櫃", shares=float(np.random.default_rng(i).uniform(2e7, 3e9)))
+                  for i in range(60)]
     else:
         listed = get_list()
     hist = update_history(listed)
     try:
-        ch = update_chips(trading_days(hist), [s["code"] for s in listed])
+        if INTRADAY:                                       # 盤中不抓籌碼（尚未公布），直接用快取
+            cp = os.path.join(CACHE, "chips.pkl")
+            ch = pickle.load(open(cp, "rb")) if os.path.exists(cp) else {"inst": {}, "margin": {}}
+            print("盤中模式：只更新股價")
+        else:
+            ch = update_chips(trading_days(hist), [s["code"] for s in listed])
+            update_warrants(ch, listed)
+        if not TEST and not INTRADAY:
+            pickle.dump(ch, open(os.path.join(CACHE, "chips.pkl"), "wb"))
         inst, marg = merged(ch, "inst"), merged(ch, "margin")
+        warr = {k: v.get("tse") or {} for k, v in sorted(ch.get("warrant", {}).items())}
     except Exception as e:                                  # 籌碼失敗不影響技術面
         print(f"⚠ 籌碼資料更新失敗：{e}")
-        inst, marg = {}, {}
+        inst, marg, warr = {}, {}, {}
     rows, errs = [], []
     for s in listed:
         df = hist.get(s["code"])
@@ -526,7 +665,10 @@ def main():
         try:
             x = indicators(df)
             snap = snapshot(df, x)
-            rows.append({**s, **snap, **chip_stats(s["code"], inst, marg, snap["date"])})
+            turnover = snap["close"] * snap["vol_lots"] * 1000 if snap["close"] and snap["vol_lots"] else None
+            rows.append({**{k: v for k, v in s.items() if k != "shares"}, **snap,
+                         **chip_stats(s["code"], inst, marg, snap["date"], s.get("shares"),
+                                      snap["vol_lots"], turnover, warr)})
             json.dump(chart_json(df, x, s["code"], inst, marg), open(os.path.join(PXDIR, s["code"] + ".json"), "w"),
                       separators=(",", ":"))
         except Exception as e:
@@ -536,9 +678,10 @@ def main():
     if not rows:
         sys.exit("沒有任何股票算出指標，停止（避免把網站覆蓋成空的）")
     last = max(r["date"] for r in rows)
-    meta = dict(updated=dt.datetime.now(TZ).strftime("%Y-%m-%d %H:%M"), last_date=last,
+    meta = dict(updated=dt.datetime.now(TZ).strftime("%Y-%m-%d %H:%M"), last_date=last, intraday=INTRADAY,
                 inst_date=max((r.get("inst_date") or "" for r in rows), default="") or None,
                 margin_date=max((r.get("margin_date") or "" for r in rows), default="") or None,
+                warrant_date=max((r.get("w_date") or "" for r in rows), default="") or None,
                 n_list=len(listed), n_rows=len(rows), n_stale=sum(r["date"] < last for r in rows), rows=rows)
     json.dump(meta, open(os.path.join(OUT, "snapshot.json"), "w", encoding="utf-8"),
               ensure_ascii=False, separators=(",", ":"))
