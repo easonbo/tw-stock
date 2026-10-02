@@ -39,6 +39,9 @@ tbody tr{cursor:pointer}tbody tr:hover,tbody tr.sel{background:var(--hl)}
 #chartBox{margin-bottom:16px}
 .chartHead{display:flex;flex-wrap:wrap;gap:10px;align-items:center;justify-content:space-between}
 .chartHead h2{font-size:16px;margin:0}
+#links{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-top:6px}
+#links a{font-size:12.5px;padding:3px 9px;border:1px solid var(--line);border-radius:999px;color:var(--acc);text-decoration:none;background:var(--bg)}
+#links a:hover{border-color:var(--acc)}
 #chart{height:640px}
 </style>
 </head>
@@ -69,6 +72,8 @@ tbody tr{cursor:pointer}tbody tr:hover,tbody tr.sel{background:var(--hl)}
     <label>K 值 區間</label><div class="row2"><input id="kMin" type="number" placeholder="最小">～<input id="kMax" type="number" placeholder="最大"></div>
     <label>20 日漲跌 % 區間</label><div class="row2"><input id="r20Min" type="number" placeholder="最小">～<input id="r20Max" type="number" placeholder="最大"></div>
     <label>ADX ≥（&gt;25 代表有趨勢）</label><input id="adx" type="number" min="0" placeholder="不限">
+    <label>外資 5 日買超佔股本 ≥（‰）</label><input id="fcap" type="number" step="0.5" placeholder="不限">
+    <label>投信 5 日買超佔股本 ≥（‰）</label><input id="tcap" type="number" step="0.5" placeholder="不限">
     <div id="flags"></div>
   </details>
   <p style="margin-top:14px"><button id="reset">重設條件</button></p>
@@ -77,10 +82,11 @@ tbody tr{cursor:pointer}tbody tr:hover,tbody tr.sel{background:var(--hl)}
 <section>
   <div id="chartBox" class="card" hidden>
     <div class="chartHead">
-      <h2 id="chartTitle"></h2>
+      <div><h2 id="chartTitle"></h2><div id="links"></div></div>
       <div class="inline" style="align-items:center">
         <select id="sub"></select>
         <label class="chk"><input type="checkbox" id="bb">布林通道</label>
+        <label class="chk"><input type="checkbox" id="sr">支撐壓力</label>
         <button id="closeChart">關閉</button>
       </div>
     </div>
@@ -88,7 +94,7 @@ tbody tr{cursor:pointer}tbody tr:hover,tbody tr.sel{background:var(--hl)}
   </div>
   <div class="card">
     <div class="chartHead"><p id="count" style="margin:0"></p>
-      <select id="view"><option value="all">表格：全部欄位</option><option value="t" selected>表格：技術面</option><option value="c">表格：籌碼面</option></select></div>
+      <select id="view"><option value="all">表格：全部欄位</option><option value="t" selected>表格：技術面</option><option value="c">表格：籌碼面</option><option value="d">表格：當沖</option></select></div>
     <div class="tablewrap"><table><thead id="thead"></thead><tbody id="tbody"></tbody></table></div>
   </div>
 </section>
@@ -98,21 +104,40 @@ tbody tr{cursor:pointer}tbody tr:hover,tbody tr.sel{background:var(--hl)}
 "use strict";
 // ------------------------------------------------------------------ 設定
 const FLAGS = [
-  ["均線", [["ma_bull","均線多頭排列（5>20>60）"],["above_ma20","站上月線 MA20"],["above_ma60","站上季線 MA60"],
+  ["均線", [["ma20_bend","月線上彎（5日加權斜率>0且加速）"],["ma20_turn","月線剛翻揚（斜率由負轉正）"],["ma_bull","均線多頭排列（5>20>60）"],["above_ma20","站上月線 MA20"],["above_ma60","站上季線 MA60"],
            ["above_ma120","站上半年線"],["above_ma240","站上年線"],["ma_tangle","均線糾結"]]],
   ["動能", [["kd_golden","KD 今日黃金交叉"],["kd_low_gold","KD 低檔(<30)黃金交叉"],["macd_golden","MACD 今日黃金交叉"],
            ["macd_pos","DIF 在 MACD 之上"],["dmi_bull","+DI > -DI"],["obv_up","OBV 在 20 日均線上"]]],
+  ["布林通道", [["bb_mid_up","中軌（月線）上揚"],["bb_open","開口變大（參考月線）"],["bb_shrink","開口變小（參考月線）"],
+           ["bb60_open","開口變大（參考季線）"],["bb60_shrink","開口變小（參考季線）"],
+           ["bb_upper_zone","股價介於上軌與中軌"],["bb_lower_zone","股價介於中軌與下軌"]]],
   ["型態／量能", [["breakout20","突破前 20 日高點"],["near_high52","距 52 週高 5% 內"],["bb_squeeze","布林收斂"],
            ["bb_up_break","突破布林上軌"],["bb_dn_break","跌破布林下軌"],["up3","連 3 日收紅"],["vol_expand","5日均量 > 20日均量"]]],
   ["籌碼", [["c_f_buy","外資今日買超"],["c_t_buy","投信今日買超"],["c_all_buy","三大法人今日同步買超"],
            ["c_f_streak","外資連買 ≥ 3 日"],["c_t_streak","投信連買 ≥ 3 日"],["c_tot5","法人 5 日合計買超"],
-           ["c_m_down","融資今日減少"],["c_m_down5","融資 5 日減少"],["c_ms20","券資比 ≥ 20%"]]]
+           ["c_f_cap","外資 5 日買超 ≥ 1‰ 股本"],["c_t_cap","投信 5 日買超 ≥ 1‰ 股本"],["c_t_cap20","投信 20 日買超 ≥ 5‰ 股本"],
+           ["c_f_flip","外資翻多（近5日轉買超）"],["c_t_flip","投信翻多（近5日轉買超）"],
+           ["c_m_down","融資今日減少"],["c_m_down5","融資 5 日減少"],["c_ms20","券資比 ≥ 20%"]]],
+  ["權證", [["w_hot","認購權證成交暴增（≥ 3 倍）"],["w_big","認購權證成交額 ≥ 現股 5%"],["w_callside","認購 ≫ 認售（售/購比 < 0.3）"]]]
 ];
 // 籌碼旗標：由數值欄位推出（資料缺漏時為 undefined → 不符合）
 function chipFlags(r){
   r.c_f_buy = r.f1>0; r.c_t_buy = r.t1>0; r.c_all_buy = r.f1>0 && r.t1>0 && r.d1>0;
   r.c_f_streak = r.f_streak>=3; r.c_t_streak = r.t_streak>=3; r.c_tot5 = r.tot5>0;
   r.c_m_down = r.m_chg<0; r.c_m_down5 = r.m_chg5<0; r.c_ms20 = r.ms_ratio>=20;
+  r.c_f_flip = r.f5>0 && !(r.f5_prev>0); r.c_t_flip = r.t5>0 && !(r.t5_prev>0);
+  r.c_f_cap = r.f5_cap>=1; r.c_t_cap = r.t5_cap>=1; r.c_t_cap20 = r.t20_cap>=5;
+  r.w_hot = r.w_surge>=3; r.w_big = r.w_ratio>=5; r.w_callside = r.w_call>0 && r.w_pc<0.3;
+  // 均線／布林斜率旗標
+  r.ma20_bend = r.ma20_s>0 && r.ma20_s>r.ma20_s_prev; r.ma20_turn = r.ma20_s>0 && r.ma20_s_prev<=0;
+  r.bb_mid_up = r.ma20_s>0; r.bb_open = r.bbw_s>0; r.bb_shrink = r.bbw_s<0;
+  r.bb60_open = r.bbw60_s>0; r.bb60_shrink = r.bbw60_s<0;
+  r.bb_upper_zone = r.bb_pos>=0.5 && r.bb_pos<=1; r.bb_lower_zone = r.bb_pos>=0 && r.bb_pos<0.5;
+  // 當沖方向：5 個條件各 ±1 分，≥3 偏多、≤-3 偏空
+  const sc = [r.close>r.ma5, r.ma5_s>0, r.day_pos>0.5, r.hist>r.hist_prev, r.tot1>0];
+  const neg = [r.close<r.ma5, r.ma5_s<0, r.day_pos<0.5, r.hist<r.hist_prev, r.tot1<0];
+  r.dt_score = sc.filter(Boolean).length - neg.filter(Boolean).length;
+  r.dt_dir = r.dt_score>=3 ? "偏多" : r.dt_score<=-3 ? "偏空" : "觀望";
   return r;
 }
 const desc = (a,b) => (x,y) => cmpNum(y[a],x[a]) || (b ? cmpNum(y[b],x[b]) : 0);
@@ -126,10 +151,10 @@ const PRESETS = {
           ["RSI脫離超賣",r=>r.rsi_prev<=30 && r.rsi>30],["OBV翻揚",r=>r.obv_up===true]],
     min:2, sort:desc("score","vol_ratio")},
   daytrade:{name:"當沖候選",
-    desc:"前提：20 日均量 ≥ 3,000 張、均成交值 ≥ 3 億、股價 20–1,000 元、20 日平均振幅 ≥ 3%。加分：振幅 ≥5%、ATR% 3–8、今日量增、今日漲跌 ≥3%、ADX ≥25。※ 下單前請確認可現股當沖、非處置/注意股。",
+    desc:"前提：20 日均量 ≥ 3,000 張、均成交值 ≥ 3 億、股價 20–1,000 元、20 日平均振幅 ≥ 3%。加分：振幅 ≥5%、ATR% 3–8、今日量增、今日漲跌 ≥3%、ADX ≥25、方向明確。方向：站上/跌破5日線、5日線斜率、收盤在當日高/低半部、MACD柱、法人買賣，5項合計 ≥+3 偏多、≤−3 偏空。支撐／壓力為 CDP（以最近一日高低收推算下一交易日）：壓力 NH、強壓力 AH、支撐 NL、強支撐 AL。※ 做空需可現股當沖先賣、非平盤下禁空；下單前確認非處置/注意股。",
     base:r => r.vma20_lots>=3000 && r.turnover20>=3 && r.close>=20 && r.close<=1000 && r.amp20>=3,
     sigs:[["振幅≥5%",r=>r.amp20>=5],["ATR%適中",r=>r.atr_pct>=3 && r.atr_pct<=8],["今日量增",r=>r.vol_ratio>=1.3],
-          ["今日波動大",r=>Math.abs(r.chg_pct)>=3],["趨勢明確",r=>r.adx>=25]],
+          ["今日波動大",r=>Math.abs(r.chg_pct)>=3],["趨勢明確",r=>r.adx>=25],["方向明確",r=>r.dt_dir!=="觀望"]],
     min:0, sort:desc("score","amp20")},
   breakout:{name:"量價突破",
     desc:"前提：收盤突破前 20 日高點、量比 ≥1.5、收紅K。加分：均線多頭、ADX ≥20、近 52 週高、OBV 走強、MACD 多方。",
@@ -148,12 +173,24 @@ const PRESETS = {
     base:r => r.bb_squeeze===true,
     sigs:[["量能放大",r=>r.vol_expand===true],["MACD多方",r=>r.macd_pos===true],["站上中軌",r=>r.bb_pos>0.5],["收紅K",r=>r.red===true]],
     min:0, sort:desc("score","vol_ratio")},
+  maflip:  {name:"月線上彎＋法人翻多",
+    desc:"前提：月線上彎（近5日加權斜率>0且比前一段更陡，或剛由負轉正），且外資或投信翻多（近5日由賣轉買，或連買 ≥2 日）。支撐＝10日線、月線、10日低點中位於股價下方且最近者；距支撐越近越適合找點做多。加分：月線剛翻揚、距支撐 ≤3%、量縮回測、布林開口變大、KD 金叉、法人今日買超。",
+    base:r => r.ma20_bend===true && (r.c_f_flip===true || r.c_t_flip===true || r.f_streak>=2 || r.t_streak>=2) && isNum(r.sup_dist),
+    sigs:[["月線剛翻揚",r=>r.ma20_turn===true],["距支撐≤3%",r=>r.sup_dist<=3],["量縮回測",r=>r.vol_ratio<1],
+          ["開口變大",r=>r.bb_open===true],["KD金叉",r=>r.kd_golden===true],["法人今日買",r=>r.tot1>0]],
+    min:0, sort:(x,y)=>cmpNum(y.score,x.score) || cmpNum(x.sup_dist,y.sup_dist)},
   trust:   {name:"投信認養",
     desc:"前提：投信連續買超 ≥ 3 日，且 5 日合計買超。加分：站上月線、均線多頭、外資 5 日也買超、融資 5 日減少、量能放大。",
     base:r => r.t_streak>=3 && r.t5>0,
     sigs:[["站上月線",r=>r.above_ma20===true],["均線多頭",r=>r.ma_bull===true],["外資同買",r=>r.f5>0],
-          ["融資減少",r=>r.m_chg5<0],["量能放大",r=>r.vol_expand===true]],
-    min:0, sort:desc("score","t5")},
+          ["融資減少",r=>r.m_chg5<0],["量能放大",r=>r.vol_expand===true],["投信20日≥5‰股本",r=>r.t20_cap>=5]],
+    min:0, sort:desc("score","t20_cap")},
+  warrant: {name:"權證異常買盤",
+    desc:"前提：今日認購權證成交額為前 10 日平均的 3 倍以上，或達現股成交額的 5% 以上，且認購明顯多於認售（售/購比 < 0.5）。加分：股價尚未大漲（今日漲幅 < 3%）、站上月線、月線上彎、法人今日買超、量能放大。※ 權證成交額無法分辨買方是誰，也包含賣回給發行商的量；『特定大戶』需券商分點資料才能確認。目前僅涵蓋上市權證。",
+    base:r => (r.w_surge>=3 || r.w_ratio>=5) && r.w_call>0 && !(r.w_pc>=0.5),
+    sigs:[["股價尚未大漲",r=>r.chg_pct<3],["站上月線",r=>r.above_ma20===true],["月線上彎",r=>r.ma20_bend===true],
+          ["法人今日買",r=>r.tot1>0],["量能放大",r=>r.vol_expand===true]],
+    min:0, sort:(x,y)=>cmpNum(y.score,x.score) || cmpNum(y.w_surge,x.w_surge) || cmpNum(y.w_ratio,x.w_ratio)},
   chips:   {name:"法人買、散戶退",
     desc:"前提：三大法人 5 日合計買超，且融資 5 日減少（籌碼從散戶流向法人）。加分：外資 5 日買超、投信 5 日買超、站上月線、MACD 多方、今日三大法人同買。",
     base:r => r.tot5>0 && r.m_chg5<0,
@@ -164,22 +201,34 @@ const PRESETS = {
 const SUBS = ["KD","RSI","MACD","法人買賣超","融資融券","DMI","OBV","W%R","CCI","MFI","乖離率"];
 const COLS_ALL = [
   {k:"code",t:"代號",l:1},{k:"name",t:"名稱",l:1},{k:"market",t:"市場",l:1},{k:"industry",t:"產業",l:1},
-  {k:"score",t:"訊號數",preset:1},{k:"reason",t:"符合訊號",preset:1,cls:"reason"},
+  {k:"score",t:"訊號數",preset:1},
+{k:"reason",t:"符合訊號",preset:1,cls:"reason"},
+  {k:"sup",t:"做多支撐",d:2,g:"s"},{k:"sup_name",t:"支撐來源",g:"s",cls:"l"},{k:"sup_dist",t:"距支撐%",d:1,g:"s"},
+  {k:"dt_dir",t:"方向",g:"d",cls:"l"},{k:"al",t:"強支撐",d:2,g:"d"},{k:"nl",t:"支撐",d:2,g:"d"},
+  {k:"nh",t:"壓力",d:2,g:"d"},{k:"ah",t:"強壓力",d:2,g:"d"},{k:"amp20",t:"振幅20%",d:1,g:"d"},
   {k:"close",t:"收盤",d:2},{k:"chg_pct",t:"漲跌%",d:2,sign:1},{k:"vol_lots",t:"量(張)",d:0},{k:"vol_ratio",t:"量比",d:2,g:"t"},
   {k:"ret20",t:"20日%",d:1,sign:1,g:"t"},{k:"rsi",t:"RSI",d:1,g:"t"},{k:"K",t:"K",d:1,g:"t"},{k:"D",t:"D",d:1,g:"t"},
-  {k:"f1",t:"外資",d:0,sign:1,g:"c"},{k:"t1",t:"投信",d:0,sign:1,g:"c"},{k:"d1",t:"自營",d:0,sign:1,g:"c"},
-  {k:"f5",t:"外資5日",d:0,sign:1,g:"c"},{k:"f20",t:"外資20日",d:0,sign:1,g:"c"},{k:"f60",t:"外資60日",d:0,sign:1,g:"c"},
-  {k:"f120",t:"外資半年",d:0,sign:1,g:"c"},{k:"f240",t:"外資一年",d:0,sign:1,g:"c"},
-  {k:"t5",t:"投信5日",d:0,sign:1,g:"c"},{k:"t20",t:"投信20日",d:0,sign:1,g:"c"},{k:"t60",t:"投信60日",d:0,sign:1,g:"c"},
-  {k:"t120",t:"投信半年",d:0,sign:1,g:"c"},{k:"t240",t:"投信一年",d:0,sign:1,g:"c"},
-  {k:"tot5",t:"法人5日",d:0,sign:1,g:"c"},{k:"tot20",t:"法人20日",d:0,sign:1,g:"c"},
-  {k:"tot60",t:"法人60日",d:0,sign:1,g:"c"},{k:"tot240",t:"法人一年",d:0,sign:1,g:"c"},
+  {k:"ma20_s",t:"月線斜率%",d:3,sign:1,g:"t"},{k:"bbw_s",t:"帶寬變化",d:2,sign:1,g:"t"},
+  {k:"f1",t:"外資(張)",d:0,sign:1,g:"c"},{k:"f1_cap",t:"外資‰",d:2,sign:1,g:"c"},
+  {k:"f5",t:"外資5日(張)",d:0,sign:1,g:"c"},{k:"f5_cap",t:"外資5日‰",d:2,sign:1,g:"c"},
+  {k:"f20",t:"外資20日(張)",d:0,sign:1,g:"c"},{k:"f20_cap",t:"外資20日‰",d:2,sign:1,g:"c"},
+  {k:"f60",t:"外資60日(張)",d:0,sign:1,g:"c"},{k:"f120",t:"外資半年(張)",d:0,sign:1,g:"c"},{k:"f240",t:"外資一年(張)",d:0,sign:1,g:"c"},
+  {k:"t1",t:"投信(張)",d:0,sign:1,g:"c"},{k:"t1_cap",t:"投信‰",d:2,sign:1,g:"c"},
+  {k:"t5",t:"投信5日(張)",d:0,sign:1,g:"c"},{k:"t5_cap",t:"投信5日‰",d:2,sign:1,g:"c"},
+  {k:"t20",t:"投信20日(張)",d:0,sign:1,g:"c"},{k:"t20_cap",t:"投信20日‰",d:2,sign:1,g:"c"},
+  {k:"t60",t:"投信60日(張)",d:0,sign:1,g:"c"},{k:"t120",t:"投信半年(張)",d:0,sign:1,g:"c"},{k:"t240",t:"投信一年(張)",d:0,sign:1,g:"c"},
+  {k:"d1",t:"自營(張)",d:0,sign:1,g:"c"},
+  {k:"tot5",t:"法人5日(張)",d:0,sign:1,g:"c"},{k:"tot5_cap",t:"法人5日‰",d:2,sign:1,g:"c"},{k:"tot20",t:"法人20日(張)",d:0,sign:1,g:"c"},
+  {k:"tot60",t:"法人60日(張)",d:0,sign:1,g:"c"},{k:"tot240",t:"法人一年(張)",d:0,sign:1,g:"c"},{k:"inst_vol_pct",t:"法人佔量%",d:1,sign:1,g:"c"},
   {k:"f_streak",t:"外資連",d:0,sign:1,g:"c"},{k:"t_streak",t:"投信連",d:0,sign:1,g:"c"},
+  {k:"w_call",t:"認購權證(萬)",d:0,g:"c"},{k:"w_ratio",t:"權證/現股%",d:1,g:"c"},{k:"w_surge",t:"權證量倍數",d:1,g:"c"},{k:"w_pc",t:"售/購比",d:2,g:"c"},
   {k:"m_chg",t:"資增減",d:0,sign:1,g:"c"},{k:"m_chg5",t:"資5日",d:0,sign:1,g:"c"},{k:"ms_ratio",t:"券資比%",d:1,g:"c"},
-  {k:"bias20",t:"乖離%",d:1,sign:1,g:"t"},{k:"adx",t:"ADX",d:1,g:"t"},{k:"amp20",t:"振幅20%",d:1,g:"t"},{k:"turnover20",t:"均值(億)",d:1,g:"t"}
+  {k:"bias20",t:"乖離%",d:1,sign:1,g:"t"},{k:"adx",t:"ADX",d:1,g:"t"},{k:"amp20",t:"振幅20%",d:1,g:"t2"},{k:"turnover20",t:"均值(億)",d:1,g:"t"}
 ];
 const MAX_ROWS = 300;
-const VIEW_NOTE = {all:"", t:"", c:"（籌碼單位：張；連＝連續買(+)／賣(−)天數）"};
+const VIEW_NOTE = {all:"", t:"（斜率＝近5日加權，%／日）", c:"（‰股本＝買賣超佔已發行股數千分比；張數欄單位：張；權證量倍數＝今日認購權證成交額÷前10日平均）",
+  d:"（支撐壓力＝CDP，適用下一個交易日）"};
+const VIEW_GROUPS = {all:null, t:["t"], c:["c"], d:["d"]};
 
 // ------------------------------------------------------------------ 工具
 const $ = id => document.getElementById(id);
@@ -194,8 +243,8 @@ let DATA=[], META={}, sortKey=null, sortDir=-1, current=null, lastRows=[];
 // ------------------------------------------------------------------ 初始化
 fetch("data/snapshot.json?t="+Date.now()).then(r=>{ if(!r.ok) throw new Error(r.status); return r.json(); }).then(j=>{
   META=j;
-  DATA=j.rows.map(r=>{ for(const k in r) if(r[k]===null && !/^(code|name|market|industry|date|inst_date|margin_date)$/.test(k)) r[k]=NaN; return chipFlags(r); });
-  $("status").textContent = `股價 ${j.last_date}｜法人 ${j.inst_date||"–"}｜資券 ${j.margin_date||"–"}｜更新於 ${j.updated}｜${j.n_rows} 檔`+(j.n_stale?`（${j.n_stale} 檔股價較舊）`:"");
+  DATA=j.rows.map(r=>{ for(const k in r) if(r[k]===null && !/^(code|name|market|industry|date|inst_date|margin_date|sup_name|w_date)$/.test(k)) r[k]=NaN; return chipFlags(r); });
+  $("status").textContent = (j.intraday?"🟢 盤中資料（非即時，約 30–60 分鐘更新）｜":"") + `股價 ${j.last_date}｜法人 ${j.inst_date||"–"}｜資券 ${j.margin_date||"–"}｜權證 ${j.warrant_date||"–"}｜更新於 ${j.updated}｜${j.n_rows} 檔`+(j.n_stale?`（${j.n_stale} 檔股價較舊）`:"");
   [...new Set(DATA.map(r=>r.industry))].sort((a,b)=>a.localeCompare(b,"zh-Hant")).forEach(i=>$("ind").add(new Option(i,i)));
   render();
 }).catch(e=>{ $("status").textContent="讀不到資料（"+e.message+"）：請確認 GitHub Actions 已成功執行過一次。"; });
@@ -205,7 +254,10 @@ SUBS.forEach(s=>$("sub").add(new Option("副圖："+s,s)));
 $("flags").innerHTML = FLAGS.map(([g,items])=>`<fieldset><legend>${g}</legend>`+
   items.map(([k,t])=>`<label class="chk"><input type="checkbox" class="flag" value="${k}">${t}</label>`).join("")+"</fieldset>").join("");
 
-document.querySelector("aside").addEventListener("input", ()=>{ sortKey=null; render(); });
+document.querySelector("aside").addEventListener("input", e=>{
+  if(e.target.id==="preset" && e.target.value==="daytrade") $("view").value="d";
+  if(e.target.id==="preset" && ["warrant","trust","chips"].includes(e.target.value)) $("view").value="c";
+  sortKey=null; render(); });
 $("reset").onclick = ()=>{
   document.querySelectorAll("aside input[type=number]:not(#minvol), aside input[type=search]").forEach(i=>i.value="");
   $("minvol").value=500; $("preset").value="none"; $("ind").value="";
@@ -214,7 +266,7 @@ $("reset").onclick = ()=>{
   sortKey=null; render();
 };
 $("view").onchange = render;
-$("sub").onchange = $("bb").onchange = ()=> current && drawChart(current.code, current.name);
+$("sr").onchange = $("sub").onchange = $("bb").onchange = ()=> current && drawChart(current.code, current.name);
 $("closeChart").onclick = ()=>{ $("chartBox").hidden=true; current=null; };
 
 // ------------------------------------------------------------------ 篩選
@@ -222,7 +274,7 @@ function filterRows(){
   const mk=[...document.querySelectorAll("input[name=mkt]:checked")].map(c=>c.value);
   const ind=$("ind").value, minvol=val("minvol")??0, q=$("q").value.trim().toLowerCase();
   const rng=[["rsi","rsiMin","rsiMax"],["K","kMin","kMax"],["ret20","r20Min","r20Max"]];
-  const vr=val("vr"), adx=val("adx");
+  const vr=val("vr"), adx=val("adx"), fcap=val("fcap"), tcap=val("tcap");
   const flags=[...document.querySelectorAll(".flag:checked")].map(c=>c.value);
   let rows = DATA.filter(r=>{
     if(!mk.includes(r.market)) return false;
@@ -231,6 +283,8 @@ function filterRows(){
     if(!(r.vol_lots>=minvol)) return false;
     if(vr!==null && !(r.vol_ratio>=vr)) return false;
     if(adx!==null && !(r.adx>=adx)) return false;
+    if(fcap!==null && !(r.f5_cap>=fcap)) return false;
+    if(tcap!==null && !(r.t5_cap>=tcap)) return false;
     for(const [k,a,b] of rng){ const lo=val(a), hi=val(b);
       if(lo!==null && !(r[k]>=lo)) return false; if(hi!==null && !(r[k]<=hi)) return false; }
     for(const f of flags) if(r[f]!==true) return false;
@@ -252,13 +306,20 @@ function render(){
   if(!DATA.length) return;
   const rows=filterRows(), presetOn=$("preset").value!=="none";
   const view=$("view").value;
-  const cols=COLS_ALL.filter(c=>(!c.preset||presetOn) && (view==="all"||!c.g||c.g===view));
+  const pk=$("preset").value;
+  const cols=COLS_ALL.filter(c=>{
+    if(c.preset) return presetOn;
+    if(c.g==="s") return pk==="maflip" || view==="all";               // 做多支撐欄位只在該策略顯示
+    if(c.g==="t2") return view==="t";
+    return view==="all" || !c.g || VIEW_GROUPS[view].includes(c.g);
+  });
   lastRows=rows;
   $("count").textContent=`符合條件：${rows.length} 檔`+(rows.length>MAX_ROWS?`（只顯示前 ${MAX_ROWS} 檔）`:"")+"　點任一列看線圖，點欄位標題可排序"+VIEW_NOTE[$("view").value];
   $("thead").innerHTML="<tr>"+cols.map(c=>`<th class="${c.l?"l":""}" data-k="${c.k}">${c.t}${sortKey===c.k?(sortDir>0?" ▲":" ▼"):""}</th>`).join("")+"</tr>";
   $("tbody").innerHTML=rows.slice(0,MAX_ROWS).map((r,i)=>`<tr data-i="${i}" class="${current&&current.code===r.code?"sel":""}">`+cols.map(c=>{
     let v=r[c.k], cls=c.cls||(c.l?"l":"");
     if(c.d!==undefined){ if(c.sign&&isNum(v)) cls+=v>0?" pos":v<0?" neg":""; v=fmt(v,c.d); }
+    if(c.k==="dt_dir") cls+= v==="偏多"?" pos":v==="偏空"?" neg":"";
     if(c.k==="name" && r.date<META.last_date) v+=` <span class="stale" title="資料停在 ${r.date}">*</span>`;
     return `<td class="${cls}">${v??""}</td>`;
   }).join("")+"</tr>").join("");
@@ -271,7 +332,7 @@ $("thead").addEventListener("click",e=>{
 });
 $("tbody").addEventListener("click",e=>{
   const tr=e.target.closest("tr"); if(!tr) return;
-  const r=lastRows[+tr.dataset.i]; current={code:r.code,name:r.name};
+  const r=lastRows[+tr.dataset.i]; current={code:r.code,name:r.name,row:r};
   document.querySelectorAll("#tbody tr.sel").forEach(x=>x.classList.remove("sel")); tr.classList.add("sel");
   drawChart(r.code,r.name);
 });
@@ -280,6 +341,11 @@ $("tbody").addEventListener("click",e=>{
 const cache={};
 async function drawChart(code,name){
   $("chartBox").hidden=false; $("chartTitle").textContent=`${code} ${name}`;
+  const mkt=(current&&current.row&&current.row.market)==="上櫃" ? "TWO" : "TW";
+  const L=[["看分點：Yahoo 主力進出",`https://tw.stock.yahoo.com/quote/${code}.${mkt}/broker-trading`],
+           ["HiStock 分點",`https://histock.tw/stock/branch.aspx?no=${code}`],
+           ["富邦 主力進出",`https://fubon-ebrokerdj.fbs.com.tw/z/zc/zco/zco_${code}.djhtm`]];
+  $("links").innerHTML=L.map(([t,u])=>`<a href="${u}" target="_blank" rel="noopener">${t} ↗</a>`).join("");
   $("chartBox").scrollIntoView({behavior:"smooth",block:"start"});
   let p=cache[code];
   if(!p){ try{ p=cache[code]=await (await fetch(`data/px/${code}.json`)).json(); }
@@ -293,6 +359,15 @@ async function drawChart(code,name){
     line(p.ma120,"半年線","#00897b","y",{visible:"legendonly"}), line(p.ma240,"年線","#616161","y",{visible:"legendonly"}),
     {type:"bar",x,y:p.v,name:"量(張)",yaxis:"y2",marker:{color:p.c.map((c,i)=>c>=p.o[i]?UP:DN)}}
   ];
+  if($("sr").checked){
+    const n=p.c.length-1, H=p.h[n], L=p.l[n], C=p.c[n], cdp=(H+L+2*C)/4, rg=H-L, xs=x.slice(-20);
+    const hl=(v,name,color,dash)=>({type:"scatter",mode:"lines",x:xs,y:xs.map(()=>+v.toFixed(2)),yaxis:"y",name,
+      line:{width:1.3,dash,color},hovertemplate:name+" %{y}<extra></extra>"});
+    tr.push(hl(cdp+rg,"強壓力 AH","#b71c1c","dot"), hl(2*cdp-L,"壓力 NH","#e57373","dash"),
+            hl(2*cdp-H,"支撐 NL","#81c784","dash"), hl(cdp-rg,"強支撐 AL","#1b5e20","dot"));
+    const row=current&&current.row;
+    if(row && isNum(row.sup)) tr.push(hl(row.sup,`做多支撐（${row.sup_name}）`,"#1565c0","solid"));
+  }
   if($("bb").checked) tr.push(line(p.up,"布林上軌","#90a4ae","y",{line:{dash:"dash",width:1,color:"#90a4ae"}}), line(p.dn,"布林下軌","#90a4ae","y",{line:{dash:"dash",width:1,color:"#90a4ae"}}));
   const s=$("sub").value, Y="y3"; let range=null;
   if(s==="KD"){ tr.push(line(p.K,"K","#ef6c00",Y),line(p.D,"D","#00838f",Y),ref(20,Y),ref(80,Y)); range=[0,100]; }
