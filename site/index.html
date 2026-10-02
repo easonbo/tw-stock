@@ -72,6 +72,7 @@ tbody tr{cursor:pointer}tbody tr:hover,tbody tr.sel{background:var(--hl)}
     <label>K 值 區間</label><div class="row2"><input id="kMin" type="number" placeholder="最小">～<input id="kMax" type="number" placeholder="最大"></div>
     <label>20 日漲跌 % 區間</label><div class="row2"><input id="r20Min" type="number" placeholder="最小">～<input id="r20Max" type="number" placeholder="最大"></div>
     <label>ADX ≥（&gt;25 代表有趨勢）</label><input id="adx" type="number" min="0" placeholder="不限">
+    <label>布林上軌 3 日斜率 ≥（%／日，自動排除月線下彎）</label><input id="bbs" type="number" step="0.1" placeholder="不限">
     <label>外資 5 日買超佔股本 ≥（‰）</label><input id="fcap" type="number" step="0.5" placeholder="不限">
     <label>投信 5 日買超佔股本 ≥（‰）</label><input id="tcap" type="number" step="0.5" placeholder="不限">
     <div id="flags"></div>
@@ -108,7 +109,7 @@ const FLAGS = [
            ["above_ma120","站上半年線"],["above_ma240","站上年線"],["ma_tangle","均線糾結"]]],
   ["動能", [["kd_golden","KD 今日黃金交叉"],["kd_low_gold","KD 低檔(<30)黃金交叉"],["macd_golden","MACD 今日黃金交叉"],
            ["macd_pos","DIF 在 MACD 之上"],["dmi_bull","+DI > -DI"],["obv_up","OBV 在 20 日均線上"]]],
-  ["布林通道", [["bb_mid_up","中軌（月線）上揚"],["bb_open","開口變大（參考月線）"],["bb_shrink","開口變小（參考月線）"],
+  ["布林通道", [["bb_up3_good","上軌 3 日斜率向上，且月線 3 日未遞減"],["ma20_nodown3","月線近 3 日未遞減（排除月線下彎）"],["bb_mid_up","中軌（月線）上揚"],["bb_open","開口變大（參考月線）"],["bb_shrink","開口變小（參考月線）"],
            ["bb60_open","開口變大（參考季線）"],["bb60_shrink","開口變小（參考季線）"],
            ["bb_upper_zone","股價介於上軌與中軌"],["bb_lower_zone","股價介於中軌與下軌"]]],
   ["型態／量能", [["breakout20","突破前 20 日高點"],["near_high52","距 52 週高 5% 內"],["bb_squeeze","布林收斂"],
@@ -132,6 +133,7 @@ function chipFlags(r){
   r.ma20_bend = r.ma20_s>0 && r.ma20_s>r.ma20_s_prev; r.ma20_turn = r.ma20_s>0 && r.ma20_s_prev<=0;
   r.bb_mid_up = r.ma20_s>0; r.bb_open = r.bbw_s>0; r.bb_shrink = r.bbw_s<0;
   r.bb60_open = r.bbw60_s>0; r.bb60_shrink = r.bbw60_s<0;
+  r.bb_up3_good = r.bb_up_s3>0 && r.ma20_nodown3===true;
   r.bb_upper_zone = r.bb_pos>=0.5 && r.bb_pos<=1; r.bb_lower_zone = r.bb_pos>=0 && r.bb_pos<0.5;
   // 當沖方向：5 個條件各 ±1 分，≥3 偏多、≤-3 偏空
   const sc = [r.close>r.ma5, r.ma5_s>0, r.day_pos>0.5, r.hist>r.hist_prev, r.tot1>0];
@@ -179,6 +181,12 @@ const PRESETS = {
     sigs:[["月線剛翻揚",r=>r.ma20_turn===true],["距支撐≤3%",r=>r.sup_dist<=3],["量縮回測",r=>r.vol_ratio<1],
           ["開口變大",r=>r.bb_open===true],["KD金叉",r=>r.kd_golden===true],["法人今日買",r=>r.tot1>0]],
     min:0, sort:(x,y)=>cmpNum(y.score,x.score) || cmpNum(x.sup_dist,y.sup_dist)},
+  bbup:    {name:"布林上軌擴張（多方開口）",
+    desc:"上軌近 3 日斜率＝（第2天−第1天 ＋ 第3天−第2天）÷ 2，即兩段斜率的平均。前提：上軌 3 日斜率 > 0，且月線（中軌）近 3 日沒有遞減，排除『向下崩跌造成的開口』。加分：收在中軌之上、貼近上軌（布林位置 ≥ 0.8）、量能放大、法人 5 日買超、MACD 多方。依上軌斜率 % 由大到小排序。",
+    base:r => r.bb_up_s3>0 && r.ma20_nodown3===true,
+    sigs:[["收在中軌上",r=>r.bb_pos>0.5],["貼近上軌",r=>r.bb_pos>=0.8],["量能放大",r=>r.vol_expand===true],
+          ["法人5日買超",r=>r.tot5>0],["MACD多方",r=>r.macd_pos===true]],
+    min:0, sort:(x,y)=>cmpNum(y.bb_up_s3_pct,x.bb_up_s3_pct)},
   trust:   {name:"投信認養",
     desc:"前提：投信連續買超 ≥ 3 日，且 5 日合計買超。加分：站上月線、均線多頭、外資 5 日也買超、融資 5 日減少、量能放大。",
     base:r => r.t_streak>=3 && r.t5>0,
@@ -208,6 +216,7 @@ const COLS_ALL = [
   {k:"nh",t:"壓力",d:2,g:"d"},{k:"ah",t:"強壓力",d:2,g:"d"},{k:"amp20",t:"振幅20%",d:1,g:"d"},
   {k:"close",t:"收盤",d:2},{k:"chg_pct",t:"漲跌%",d:2,sign:1},{k:"vol_lots",t:"量(張)",d:0},{k:"vol_ratio",t:"量比",d:2,g:"t"},
   {k:"ret20",t:"20日%",d:1,sign:1,g:"t"},{k:"rsi",t:"RSI",d:1,g:"t"},{k:"K",t:"K",d:1,g:"t"},{k:"D",t:"D",d:1,g:"t"},
+  {k:"bb_up",t:"布林上軌",d:4,g:"t"},{k:"bb_up_s3",t:"上軌3日斜率(元)",d:4,sign:1,g:"t"},{k:"bb_up_s3_pct",t:"上軌3日斜率%",d:3,sign:1,g:"t"},
   {k:"ma20_s",t:"月線斜率%",d:3,sign:1,g:"t"},{k:"bbw_s",t:"帶寬變化",d:2,sign:1,g:"t"},
   {k:"f1",t:"外資(張)",d:0,sign:1,g:"c"},{k:"f1_cap",t:"外資‰",d:2,sign:1,g:"c"},
   {k:"f5",t:"外資5日(張)",d:0,sign:1,g:"c"},{k:"f5_cap",t:"外資5日‰",d:2,sign:1,g:"c"},
@@ -226,7 +235,7 @@ const COLS_ALL = [
   {k:"bias20",t:"乖離%",d:1,sign:1,g:"t"},{k:"adx",t:"ADX",d:1,g:"t"},{k:"amp20",t:"振幅20%",d:1,g:"t2"},{k:"turnover20",t:"均值(億)",d:1,g:"t"}
 ];
 const MAX_ROWS = 300;
-const VIEW_NOTE = {all:"", t:"（斜率＝近5日加權，%／日）", c:"（‰股本＝買賣超佔已發行股數千分比；張數欄單位：張；權證量倍數＝今日認購權證成交額÷前10日平均）",
+const VIEW_NOTE = {all:"", t:"（月線斜率＝近5日加權；上軌3日斜率＝近3日兩段斜率平均）", c:"（‰股本＝買賣超佔已發行股數千分比；張數欄單位：張；權證量倍數＝今日認購權證成交額÷前10日平均）",
   d:"（支撐壓力＝CDP，適用下一個交易日）"};
 const VIEW_GROUPS = {all:null, t:["t"], c:["c"], d:["d"]};
 
@@ -274,7 +283,7 @@ function filterRows(){
   const mk=[...document.querySelectorAll("input[name=mkt]:checked")].map(c=>c.value);
   const ind=$("ind").value, minvol=val("minvol")??0, q=$("q").value.trim().toLowerCase();
   const rng=[["rsi","rsiMin","rsiMax"],["K","kMin","kMax"],["ret20","r20Min","r20Max"]];
-  const vr=val("vr"), adx=val("adx"), fcap=val("fcap"), tcap=val("tcap");
+  const vr=val("vr"), adx=val("adx"), fcap=val("fcap"), tcap=val("tcap"), bbs=val("bbs");
   const flags=[...document.querySelectorAll(".flag:checked")].map(c=>c.value);
   let rows = DATA.filter(r=>{
     if(!mk.includes(r.market)) return false;
@@ -283,6 +292,7 @@ function filterRows(){
     if(!(r.vol_lots>=minvol)) return false;
     if(vr!==null && !(r.vol_ratio>=vr)) return false;
     if(adx!==null && !(r.adx>=adx)) return false;
+    if(bbs!==null && !(r.bb_up_s3_pct>=bbs && r.ma20_nodown3===true)) return false;
     if(fcap!==null && !(r.f5_cap>=fcap)) return false;
     if(tcap!==null && !(r.t5_cap>=tcap)) return false;
     for(const [k,a,b] of rng){ const lo=val(a), hi=val(b);
