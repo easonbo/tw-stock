@@ -588,6 +588,9 @@ def snapshot(df, x):
         bbw_s=wslope(x["bbw"]), bbw60_s=wslope(x["bbw60"]),
         # ---- 布林上軌近 3 日斜率：上軌 U(t-2), U(t-1), U(t) → 兩段斜率取平均（元／日；另換算 %／日）
         **upper_slope3(x["up"], x["ma20"], close),
+        # ---- 關鍵價位（情境整理用）
+        ma5v=L("ma5"), ma10v=L("ma10"), ma20v=L("ma20"), ma60v=L("ma60"), ma240v=L("ma240"),
+        high20=num(df["High"].iloc[-21:-1].max()), low20=num(df["Low"].iloc[-21:-1].min()),
         # ---- 當沖：CDP 逆勢操作價位（以今日高低收推算下一個交易日）
         **cdp_levels(num(df["High"].iloc[-1]), num(df["Low"].iloc[-1]), close),
         day_pos=num((close - df["Low"].iloc[-1]) / (df["High"].iloc[-1] - df["Low"].iloc[-1]))
@@ -652,7 +655,9 @@ def chart_json(df, x, code=None, inst=None, marg=None):
 # --------------------------------------------------------------------------- 回測
 # 問題：收盤時出現某訊號的股票，之後 10 個交易日內「收盤價曾比今天高 10% 以上」的機率，
 #       是否明顯高於同期所有股票的平均（基準）？倍數 lift = 訊號機率 ÷ 基準機率。
-BT_HORIZON, BT_BIG = 10, 0.10
+BT_HORIZONS = (5, 10, 20)                   # 期間（交易日）
+BT_THRESHOLDS = (5, 10, 15)                 # 漲幅門檻（%）
+BT_DEFAULT = "h10_t10"
 BT_MIN_VOL, BT_MIN_PRICE = 500, 10          # 只用 20 日均量 ≥ 500 張、股價 ≥ 10 元的日子，避免冷門股雜訊
 
 SIG_NAMES = {
@@ -737,11 +742,12 @@ def bt_signals(df, x, code, inst, marg, shares):
     S["P_trust"] = S["c_t_streak"] & (t5 > 0)
     S["P_chips"] = S["c_tot5"] & S["c_m_down5"]
     sig = pd.DataFrame(S).fillna(False).astype(bool)
-    # 結果：未來 10 日內最高收盤漲幅、5／20 日報酬
-    fmax = c[::-1].rolling(BT_HORIZON).max()[::-1].shift(-1) / c - 1
-    out = pd.DataFrame({"big": fmax >= BT_BIG, "r5": c.shift(-5) / c - 1, "r20": c.shift(-20) / c - 1,
-                        "ok": (x["vma20"] / 1000 >= BT_MIN_VOL) & (c >= BT_MIN_PRICE) & fmax.notna() & x["ma60"].notna(),
+    # 結果：未來 h 日內最高收盤漲幅（h = 5／10／20），以及 5／20 日報酬
+    out = pd.DataFrame({"r5": c.shift(-5) / c - 1, "r20": c.shift(-20) / c - 1,
+                        "okb": (x["vma20"] / 1000 >= BT_MIN_VOL) & (c >= BT_MIN_PRICE) & x["ma60"].notna(),
                         "chip": has & f5.notna(), "date": df.index})
+    for h in BT_HORIZONS:
+        out[f"fmax{h}"] = (c[::-1].rolling(h).max()[::-1].shift(-1) / c - 1).astype("float32")
     return sig, out
 
 FEATS = [k for k in SIG_NAMES if not k.startswith("P_")]
@@ -770,8 +776,8 @@ def feat_matrix(sig, chip):
     X = sig[FEATS].to_numpy(dtype=np.float32)
     return np.hstack([X, chip.reshape(-1, 1).astype(np.float32)])     # 最後一欄：是否有籌碼資料（float32 節省記憶體）
 
-def build_model(sig, out):
-    ok = out["ok"].to_numpy(); y = out["big"].to_numpy().astype(float)
+def build_model(sig, out, ok, big):
+    y = big.astype(float)
     X = feat_matrix(sig, out["chip"].to_numpy())
     dates = out["date"].to_numpy()
     Xo, yo, do = X[ok], y[ok], dates[ok]
@@ -805,20 +811,27 @@ def run_backtest(frames):
         return None
     sig = pd.concat([f[0] for f in frames], ignore_index=True)
     out = pd.concat([f[1] for f in frames], ignore_index=True)
-    last = out.loc[out["ok"], "date"].max()
+    last = out.loc[out["okb"], "date"].max()
     periods = {}
     for yrs in BT_PERIODS:
         m = (out["date"] > last - pd.DateOffset(years=yrs)).to_numpy()
-        res = _bt_core(sig[m].reset_index(drop=True), out[m].reset_index(drop=True), len(frames))
-        if res:
-            res["years"] = yrs
-            periods[f"{yrs}y"] = res
-            print(f"回測 {yrs} 年：期間 {res['period']}，樣本 {res['baseline']['n']:,}，基準 {res['baseline']['p_big']}%，"
-                  f"模型 AUC {res['model']['auc_test'] if res.get('model') else '–'}")
-    return dict(generated=dt.datetime.now(TZ).strftime("%Y-%m-%d %H:%M"), default="1y", periods=periods)
+        sg, oc = sig[m].reset_index(drop=True), out[m].reset_index(drop=True)
+        periods[f"{yrs}y"] = {}
+        for h in BT_HORIZONS:
+            for t in BT_THRESHOLDS:
+                res = _bt_core(sg, oc, len(frames), h, t)
+                if res:
+                    res["years"] = yrs
+                    periods[f"{yrs}y"][f"h{h}_t{t}"] = res
+                    print(f"回測 {yrs} 年｜{h} 日漲 {t}%：基準 {res['baseline']['p_big']}%，"
+                          f"模型 AUC {res['model']['auc_test'] if res.get('model') else '–'}")
+    return dict(generated=dt.datetime.now(TZ).strftime("%Y-%m-%d %H:%M"), default_period="1y",
+                default_target=BT_DEFAULT, horizons=list(BT_HORIZONS), thresholds=list(BT_THRESHOLDS), periods=periods)
 
-def _bt_core(sig, out, n_stocks):
-    ok = out["ok"].to_numpy(); big = out["big"].to_numpy(); r5 = out["r5"].to_numpy(); r20 = out["r20"].to_numpy()
+def _bt_core(sig, out, n_stocks, h, t):
+    fm = out[f"fmax{h}"].to_numpy()
+    ok = out["okb"].to_numpy() & ~np.isnan(fm); big = fm >= t / 100
+    r5 = out["r5"].to_numpy(); r20 = out["r20"].to_numpy()
     chip = out["chip"].to_numpy()
     dates = out["date"]; mid = dates[ok].quantile(0.5) if ok.any() else None
     h1 = (dates <= mid).to_numpy() if mid is not None else ok
@@ -858,13 +871,13 @@ def _bt_core(sig, out, n_stocks):
         return dict(n=int(mask.sum()), p_big=round(float(big[mask].mean()) * 100, 1) if mask.any() else None,
                     r20=round(float(np.nanmean(r20[mask])) * 100, 2) if mask.any() else None)
     try:
-        model = build_model(sig, out)
+        model = build_model(sig, out, ok, big)
     except Exception as e:
         print(f"⚠ 機率模型失敗：{e}"); model = None
     return dict(model=model, generated=dt.datetime.now(TZ).strftime("%Y-%m-%d %H:%M"),
                 period=[okd.min().strftime("%Y-%m-%d"), okd.max().strftime("%Y-%m-%d")] if len(okd) else None,
                 chip_period=[dates[base_chip].min().strftime("%Y-%m-%d"), dates[base_chip].max().strftime("%Y-%m-%d")] if base_chip.any() else None,
-                horizon=BT_HORIZON, big=BT_BIG * 100, min_vol=BT_MIN_VOL,
+                horizon=h, big=t, min_vol=BT_MIN_VOL,
                 baseline=base_stat(base_all), baseline_chip=base_stat(base_chip),
                 n_stocks=n_stocks, signals=res, combos=combos[:20])
 
@@ -934,19 +947,14 @@ def main():
         shutil.copy(bt_path, os.path.join(OUT, "backtest.json"))
         # 用模型替每一檔打分數：10 日內漲 ≥10% 的估計機率，並列出目前成立的訊號
         try:
-            btj = json.load(open(bt_path, encoding="utf-8"))
-            models = {p: v.get("model") for p, v in (btj.get("periods") or {}).items() if v.get("model")}
-            ws = {p: np.array([m["intercept"]] + m["coef"]) for p, m in models.items()}
+            # 機率由網頁依「期間／漲幅／天數」選項，用模型係數即時計算
             for r in rows:
                 lf = last_feat.get(r["code"])
                 if lf is None:
                     continue
                 sg, chip = lf
                 r["sig_on"] = [k for k in SIG_NAMES if bool(sg[k].iloc[0])]
-                X = feat_matrix(sg, chip)
-                for p, w in ws.items():
-                    r[f"prob_{p}"] = round(float(predict(w, X)[0]) * 100, 1)
-                r["prob"] = r.get("prob_1y")
+                r["has_chip"] = bool(chip[0])
         except Exception as e:
             print(f"⚠ 機率打分失敗：{e}")
     last = max(r["date"] for r in rows)
