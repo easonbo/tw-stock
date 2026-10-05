@@ -42,7 +42,8 @@ tbody tr{cursor:pointer}tbody tr:hover,tbody tr.sel{background:var(--hl)}
 .dbox{border:1px solid var(--line);border-radius:8px;padding:8px 10px}
 .dbox b{display:block;margin-bottom:4px}
 .kv{display:flex;justify-content:space-between;gap:8px;font-size:13px;padding:1px 0}
-.kv span:first-child{color:var(--mute)}
+.kv span:first-child{color:var(--mute);white-space:nowrap}
+.kv span:last-child{text-align:right}
 .gauge{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap}
 .gauge .big{font-size:30px;font-weight:700}
 .bar{height:8px;border-radius:4px;background:var(--line);overflow:hidden;margin:6px 0;max-width:420px}
@@ -64,6 +65,8 @@ tbody tr{cursor:pointer}tbody tr:hover,tbody tr.sel{background:var(--hl)}
   <span style="margin-left:auto;display:flex;gap:8px;align-items:center">
     <select id="btPeriod" title="上漲機率與回測使用的歷史期間">
       <option value="1y">統計期間：近 1 年</option><option value="3y">統計期間：近 3 年</option><option value="5y">統計期間：近 5 年</option></select>
+    <select id="btH" title="期間"><option value="5">5 個交易日內</option><option value="10" selected>10 個交易日內</option><option value="20">20 個交易日內</option></select>
+    <select id="btT" title="漲幅門檻"><option value="5">漲 ≥ 5%</option><option value="10" selected>漲 ≥ 10%</option><option value="15">漲 ≥ 15%</option></select>
     <button id="btBtn">📊 回測：哪些指標有效</button></span></header>
 <div class="layout">
 <aside>
@@ -90,7 +93,7 @@ tbody tr{cursor:pointer}tbody tr:hover,tbody tr.sel{background:var(--hl)}
     <label>K 值 區間</label><div class="row2"><input id="kMin" type="number" placeholder="最小">～<input id="kMax" type="number" placeholder="最大"></div>
     <label>20 日漲跌 % 區間</label><div class="row2"><input id="r20Min" type="number" placeholder="最小">～<input id="r20Max" type="number" placeholder="最大"></div>
     <label>ADX ≥（&gt;25 代表有趨勢）</label><input id="adx" type="number" min="0" placeholder="不限">
-    <label>上漲機率 ≥（%，10 日內漲 ≥10% 的模型估計）</label><input id="pmin" type="number" step="1" placeholder="不限">
+    <label>上漲機率 ≥（%，依右上角的期間／漲幅目標）</label><input id="pmin" type="number" step="1" placeholder="不限">
     <label>布林上軌 3 日斜率 ≥（%／日，自動排除月線下彎）</label><input id="bbs" type="number" step="0.1" placeholder="不限">
     <label>外資 5 日買超佔股本 ≥（‰）</label><input id="fcap" type="number" step="0.5" placeholder="不限">
     <label>投信 5 日買超佔股本 ≥（‰）</label><input id="tcap" type="number" step="0.5" placeholder="不限">
@@ -275,6 +278,7 @@ fetch("data/snapshot.json?t="+Date.now()).then(r=>{ if(!r.ok) throw new Error(r.
   META=j;
   DATA=j.rows.map(r=>{ for(const k in r) if(r[k]===null && !/^(code|name|market|industry|date|inst_date|margin_date|sup_name|w_date)$/.test(k)) r[k]=NaN; return chipFlags(r); });
   $("status").textContent = (j.intraday?"🟢 盤中資料（非即時，約 30–60 分鐘更新）｜":"") + `股價 ${j.last_date}｜法人 ${j.inst_date||"–"}｜資券 ${j.margin_date||"–"}｜權證 ${j.warrant_date||"–"}｜更新於 ${j.updated}｜${j.n_rows} 檔`+(j.n_stale?`（${j.n_stale} 檔股價較舊）`:"");
+  loadBT().then(()=>{ computeProbs(); render(); });
   [...new Set(DATA.map(r=>r.industry))].sort((a,b)=>a.localeCompare(b,"zh-Hant")).forEach(i=>$("ind").add(new Option(i,i)));
   render();
 }).catch(e=>{ $("status").textContent="讀不到資料（"+e.message+"）：請確認 GitHub Actions 已成功執行過一次。"; });
@@ -370,16 +374,34 @@ $("tbody").addEventListener("click",e=>{
 });
 
 // ------------------------------------------------------------------ 回測
-let BT=null, btSort="lift", PERIOD="1y";
-const BTP = ()=> BT ? (BT.periods ? (BT.periods[PERIOD] || Object.values(BT.periods)[0]) : BT) : null;
+let BT=null, btSort="lift", PERIOD="1y", H=10, T=10;
+const TARGET = ()=>`h${H}_t${T}`;
+function BTP(){
+  if(!BT) return null;
+  if(!BT.periods) return BT;                                       // 舊格式
+  const p=BT.periods[PERIOD] || Object.values(BT.periods)[0];
+  if(p && p.signals) return p;                                     // 只有單一目標的舊格式
+  return p ? (p[TARGET()] || null) : null;
+}
+const TLABEL = ()=>`${H} 個交易日內漲 ≥ ${T}%`;
+function computeProbs(){
+  const b=BTP(), m=b&&b.model;
+  DATA.forEach(r=>{
+    if(!m || !Array.isArray(r.sig_on)){ r.prob=NaN; return; }
+    const on=new Set(r.sig_on); let z=m.intercept;
+    m.features.forEach((f,i)=>{ const x = f==="has_chip" ? (r.has_chip?1:0) : (on.has(f)?1:0); z+=m.coef[i]*x; });
+    r.prob = Math.round(1000/(1+Math.exp(-z)))/10;
+  });
+}
+async function targetChanged(){
+  await loadBT(); computeProbs(); render();
+  if(!$("btBox").hidden) renderBT();
+  if(!$("diag").hidden && current) showDiag(DATA.find(x=>x.code===current.code)||current.row);
+}
+$("btH").onchange=e=>{ H=+e.target.value; targetChanged(); };
+$("btT").onchange=e=>{ T=+e.target.value; targetChanged(); };
 const PLABEL = {"1y":"近 1 年","3y":"近 3 年","5y":"近 5 年"};
-$("btPeriod").onchange = async e=>{
-  PERIOD=e.target.value;
-  DATA.forEach(r=>{ const v=r["prob_"+PERIOD]; r.prob = v===undefined ? NaN : v; });
-  render();
-  if(!$("btBox").hidden){ await loadBT(); renderBT(); }
-  if(!$("diag").hidden && current && current.row) showDiag(DATA.find(x=>x.code===current.code)||current.row);
-};
+$("btPeriod").onchange = e=>{ PERIOD=e.target.value; targetChanged(); };
 $("btBtn").onclick = async ()=>{
   const box=$("btBox");
   if(!box.hidden){ box.hidden=true; return; }
@@ -415,13 +437,13 @@ function btRow(r, keys){
 }
 function renderBT(){
   const b=BTP(); if(!b){ $("btBox").textContent="這個期間沒有回測結果。"; return; }
-  const head=`<tr><th class="l">條件</th><th>樣本數</th><th>10日內漲≥${b.big}%機率</th><th>倍數</th><th>穩定度（前半／後半）</th><th>平均5日報酬</th><th>平均20日報酬</th><th>20日勝率</th><th></th></tr>`;
+  const head=`<tr><th class="l">條件</th><th>樣本數</th><th>${b.horizon}日內漲≥${b.big}%機率</th><th>倍數</th><th>穩定度（前半／後半）</th><th>平均5日報酬</th><th>平均20日報酬</th><th>20日勝率</th><th></th></tr>`;
   const sigs=[...b.signals].sort((x,y)=>btSort==="lift"?cmpNum(y.lift,x.lift):cmpNum(y.r20,x.r20));
   const best=sigs.filter(r=>r.n>=300 && r.lift>=1.2 && stable(r)).slice(0,6);
   $("btBox").innerHTML=`
-   <div class="chartHead"><h2>回測（${PLABEL[PERIOD]}）：出現訊號後，10 個交易日內漲 ${b.big}% 以上的機率</h2><button id="btClose">關閉</button></div>
+   <div class="chartHead"><h2>回測（${PLABEL[PERIOD]}）：出現訊號後，${b.horizon} 個交易日內漲 ${b.big}% 以上的機率</h2><button id="btClose">關閉</button></div>
    <p class="hint">期間 ${b.period?b.period.join(" ～ "):"–"}（籌碼 ${b.chip_period?b.chip_period.join(" ～ "):"資料累積中"}），${b.n_stocks} 檔，
-   只計入 20 日均量 ≥ ${b.min_vol} 張、股價 ≥ 10 元的日子。<b>基準</b>：任一天隨機挑一檔，10 日內漲 ${b.big}% 的機率是 ${b.baseline.p_big}%
+   只計入 20 日均量 ≥ ${b.min_vol} 張、股價 ≥ 10 元的日子。<b>基準</b>：任一天隨機挑一檔，${b.horizon} 日內漲 ${b.big}% 的機率是 ${b.baseline.p_big}%
    （籌碼類以 ${b.baseline_chip.p_big??"–"}% 為基準）。<b>倍數</b>＝訊號機率 ÷ 基準，1.5× 代表比亂挑高 50%。
    <b>穩定度</b>＝把期間切成前後兩半各算一次倍數，兩半都 ≥ 1.1 才標「穩定有效」。更新於 ${b.generated}。點有「套用」的列會直接帶入篩選條件。</p>
    <h3>建議優先使用</h3>
@@ -452,16 +474,17 @@ async function showDiag(r){
   box.innerHTML=`
    <div class="chartHead"><h2>個股診斷：${r.code} ${r.name}　<span class="${r.chg_pct>0?"pos":r.chg_pct<0?"neg":""}">${fmt(r.close,2)}（${fmt(r.chg_pct,2)}%）</span></h2><button id="diagClose">關閉</button></div>
    <p class="hint">${r.market}｜${r.industry}｜股價日期 ${r.date}${r.inst_date?`｜法人 ${r.inst_date}`:""}</p>
-   <h3>10 個交易日內漲 ≥ 10% 的機率（模型估計，依${PLABEL[PERIOD]}資料）</h3>
+   <h3>${TLABEL()} 的機率（模型估計，依${PLABEL[PERIOD]}資料）</h3>
    ${isNum(prob)?`<div class="gauge"><span class="big ${lift>=1.3?"pos":""}">${fmt(prob,1)}%</span>
      <span>基準 ${base}%（隨機挑一檔）｜<b>${fmt(lift,2)} 倍</b>｜高於今天 ${pctile}% 的股票</span></div>
      <div class="bar"><i style="width:${Math.min(100,prob*2)}%"></i></div>
-     <p class="hint">模型：用過去一年「哪些訊號同時出現」對「之後 10 日是否漲 ≥10%」做邏輯斯迴歸。以 ${m.test_from} 之後的資料做樣本外測試，AUC ${m.auc_test??"–"}
+     <p class="hint">模型：用過去一年「哪些訊號同時出現」對「之後 ${H} 日內是否漲 ≥${T}%」做邏輯斯迴歸。以 ${m.test_from} 之後的資料做樣本外測試，AUC ${m.auc_test??"–"}
      （0.5＝跟亂猜一樣，0.6 以上算有一定鑑別力）。${m.calib&&m.calib.length?"樣本外校準："+m.calib.map(c=>`預測 ${c.pred}% → 實際 ${c.actual}%`).join("、")+"。":""}
      機率是統計上的傾向，不是保證，也不是投資建議。</p>`
    :'<p class="hint">尚無模型估計（回測尚未產生，或這檔股票資料不足 80 天）。</p>'}
    <h3>目前成立的訊號（${on.length} 個）與歷史表現</h3>
-   ${on.length?`<div class="tablewrap" style="max-height:260px"><table><thead><tr><th class="l">訊號</th><th>歷史 10 日內漲≥10% 機率</th><th>倍數</th><th>穩定度</th><th>樣本</th></tr></thead><tbody>${sigRows}</tbody></table></div>`:'<p class="hint">目前沒有任何回測訊號成立。</p>'}
+   ${on.length?`<div class="tablewrap" style="max-height:260px"><table><thead><tr><th class="l">訊號</th><th>歷史 ${H} 日內漲≥${T}% 機率</th><th>倍數</th><th>穩定度</th><th>樣本</th></tr></thead><tbody>${sigRows}</tbody></table></div>`:'<p class="hint">目前沒有任何回測訊號成立。</p>'}
+   ${scenarioHTML(r, stats)}
    <h3>目前技術指標</h3>
    <div class="dgrid">
     <div class="dbox"><b>均線</b>${kv("站上月線",r.above_ma20)}${kv("站上季線",r.above_ma60)}${kv("站上年線",r.above_ma240)}
@@ -481,6 +504,47 @@ async function showDiag(r){
    </div>`;
   $("diagClose").onclick=()=>{ box.hidden=true; };
   box.scrollIntoView({behavior:"smooth",block:"start"});
+}
+// ---- 技術面情境整理：只整理事實與條件式情境，不給買賣建議
+function scenarioHTML(r, stats){
+  const C=r.close, pct=v=>(v/C-1)*100;
+  let trend, tcls="";
+  if(r.close>r.ma20v && r.ma20_s>0 && r.ma20v>r.ma60v){ trend="多頭格局：股價在月線上，月線上揚且在季線之上"; tcls="pos"; }
+  else if(r.close<r.ma20v && r.ma20_s<0 && r.ma20v<r.ma60v){ trend="空頭格局：股價在月線下，月線下彎且在季線之下"; tcls="neg"; }
+  else if(r.close>r.ma20v && !(r.ma20_s>0)) trend="反彈中：股價站上月線，但月線尚未上揚";
+  else if(r.close<r.ma20v && r.ma20_s>0) trend="回檔中：股價跌破月線，但月線仍在上揚";
+  else trend="盤整：均線方向不明確";
+  let mom = (r.rsi>70||r.K>80) ? "短線偏熱（RSI>70 或 K>80），追價風險較高" : (r.rsi<30||r.K<20) ? "短線超賣（RSI<30 或 K<20）" : "動能中性";
+  mom += r.hist>r.hist_prev ? "；MACD 柱轉強" : r.hist<r.hist_prev ? "；MACD 柱轉弱" : "";
+  let chip = isNum(r.tot5) ? (r.tot5>0?`法人近 5 日偏買（${fmt(r.tot5,0)} 張${isNum(r.tot5_cap)?"，"+fmt(r.tot5_cap,2)+"‰ 股本":""}）`:`法人近 5 日偏賣（${fmt(r.tot5,0)} 張）`) : "法人資料不足";
+  if(isNum(r.m_chg5)) chip += r.m_chg5<0 ? "；融資 5 日減少" : "；融資 5 日增加";
+  const S=[[`做多支撐（${r.sup_name||""}）`,r.sup],["CDP 支撐 NL",r.nl],["CDP 強支撐 AL",r.al],["月線（布林中軌）",r.ma20v],["季線",r.ma60v],["前 20 日低點",r.low20]]
+    .filter(([,v])=>isNum(v)&&v<C).sort((a,b)=>b[1]-a[1]);
+  const R=[["前 20 日高點",r.high20],["CDP 壓力 NH",r.nh],["CDP 強壓力 AH",r.ah],["布林上軌",r.bb_up],["月線",r.ma20v],["季線",r.ma60v],["年線",r.ma240v]]
+    .filter(([,v])=>isNum(v)&&v>C).sort((a,b)=>a[1]-b[1]);
+  const uniq=a=>a.filter((x,i)=>i===0||Math.abs(x[1]-a[i-1][1])/C>0.002).slice(0,3);
+  const s3=uniq(S), r3=uniq(R);
+  const lv=(arr,sign)=>arr.length?arr.map(([n,v])=>`<div class="kv"><span>${n}</span><span>${fmt(v,2)}（<span class="${sign>0?"pos":"neg"}">${sign>0?"+":""}${fmt(pct(v),1)}%</span>）</span></div>`).join(""):'<div class="kv"><span>附近沒有明確價位</span><span></span></div>';
+  const R1=r3[0], S1=s3[0], S2=s3[1];
+  const bo=stats.breakout20;
+  const up = R1 ? `收盤站上 <b>${fmt(R1[1],2)}</b>（${R1[0]}，+${fmt(pct(R1[1]),1)}%）：上方第一道壓力解除`+
+      (R1[0]==="前 20 日高點"&&bo?`；歷史上「突破 20 日高點」之後 ${H} 日內漲 ≥${T}% 的機率為 ${fmt(bo.p_big,1)}%（${fmt(bo.lift,2)} 倍）`:"") : "上方暫無明確壓力（接近或創區間新高）";
+  const dn = S1 ? `收盤跌破 <b>${fmt(S1[1],2)}</b>（${S1[0]}，${fmt(pct(S1[1]),1)}%）：短線支撐失守`+(S2?`，下一個支撐在 ${fmt(S2[1],2)}（${S2[0]}，${fmt(pct(S2[1]),1)}%）`:"") : "下方暫無明確支撐";
+  const rr = (R1&&S1) ? `上檔到第一壓力 +${fmt(pct(R1[1]),1)}%／下檔到第一支撐 ${fmt(pct(S1[1]),1)}%，比值約 ${fmt(pct(R1[1])/Math.abs(pct(S1[1])),2)} : 1` : "–";
+  return `<h3>技術面情境整理 <span class="tag">依規則整理，非投資建議</span></h3>
+   <div class="dgrid">
+    <div class="dbox"><b>目前狀態</b>
+      <div class="kv"><span>趨勢</span><span class="${tcls}">${trend}</span></div>
+      <div class="kv"><span>動能</span><span>${mom}</span></div>
+      <div class="kv"><span>籌碼</span><span>${chip}</span></div></div>
+    <div class="dbox"><b>上方壓力（由近到遠）</b>${lv(r3,1)}</div>
+    <div class="dbox"><b>下方支撐（由近到遠）</b>${lv(s3,-1)}</div>
+    <div class="dbox"><b>條件式情境</b>
+      <div class="kv"><span>若轉強</span><span>${up}</span></div>
+      <div class="kv"><span>若轉弱</span><span>${dn}</span></div>
+      <div class="kv"><span>空間比較</span><span>${rr}</span></div></div>
+   </div>
+   <p class="hint">以上由均線、KD／RSI／MACD、法人與 CDP 等規則自動整理，用來快速掌握「現在在哪、上下關卡在哪」。是否進出場、部位大小與停損請自行判斷；我不是投資顧問，這些也不是買賣建議。</p>`;
 }
 function openStock(r){ current={code:r.code,name:r.name,row:r}; showDiag(r); drawChart(r.code,r.name); }
 $("q").addEventListener("keydown",e=>{
