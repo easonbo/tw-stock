@@ -35,6 +35,11 @@ th{position:sticky;top:0;background:var(--card);cursor:pointer;user-select:none;
 th.l,td.l{text-align:left}
 tbody tr{cursor:pointer}tbody tr:hover,tbody tr.sel{background:var(--hl)}
 .pos{color:var(--up)}.neg{color:var(--dn)}.stale{color:var(--mute)}
+#btBox table td,#btBox table th{font-size:13px}
+#btBox tr.click{cursor:pointer}#btBox tr.click:hover{background:var(--hl)}
+#btBox h3{font-size:15px;margin:16px 0 6px}
+.tag{display:inline-block;font-size:11.5px;padding:1px 7px;border-radius:999px;border:1px solid var(--line);color:var(--mute)}
+.good{color:var(--up);font-weight:600}.warn{color:var(--mute)}
 .reason{white-space:normal;min-width:180px;text-align:left;color:var(--mute);font-size:12.5px}
 #chartBox{margin-bottom:16px}
 .chartHead{display:flex;flex-wrap:wrap;gap:10px;align-items:center;justify-content:space-between}
@@ -46,7 +51,8 @@ tbody tr{cursor:pointer}tbody tr:hover,tbody tr.sel{background:var(--hl)}
 </style>
 </head>
 <body>
-<header><h1>台股上市櫃 技術選股</h1><span id="status">載入中…</span></header>
+<header><h1>台股上市櫃 技術選股</h1><span id="status">載入中…</span>
+  <button id="btBtn" style="margin-left:auto">📊 回測：哪些指標有效</button></header>
 <div class="layout">
 <aside>
   <label for="preset">策略選股</label>
@@ -81,6 +87,7 @@ tbody tr{cursor:pointer}tbody tr:hover,tbody tr.sel{background:var(--hl)}
 </aside>
 
 <section>
+  <div id="btBox" class="card" hidden style="margin-bottom:16px"></div>
   <div id="chartBox" class="card" hidden>
     <div class="chartHead">
       <div><h2 id="chartTitle"></h2><div id="links"></div></div>
@@ -346,6 +353,63 @@ $("tbody").addEventListener("click",e=>{
   document.querySelectorAll("#tbody tr.sel").forEach(x=>x.classList.remove("sel")); tr.classList.add("sel");
   drawChart(r.code,r.name);
 });
+
+// ------------------------------------------------------------------ 回測
+let BT=null, btSort="lift";
+$("btBtn").onclick = async ()=>{
+  const box=$("btBox");
+  if(!box.hidden){ box.hidden=true; return; }
+  box.hidden=false; box.textContent="載入回測結果…";
+  if(!BT){ try{ const r=await fetch("data/backtest.json?t="+Date.now()); if(!r.ok) throw 0; BT=await r.json(); }
+           catch(e){ box.textContent="尚未產生回測結果：每天第一次收盤後更新時會自動計算，請稍後再看。"; return; } }
+  renderBT();
+};
+const FLAG_KEYS = new Set(FLAGS.flatMap(([,items])=>items.map(([k])=>k)));
+function canApply(k){ return FLAG_KEYS.has(k) || (k.startsWith("P_") && PRESETS[k.slice(2)]) || k==="vol15" || k==="adx25"; }
+function applyKeys(keys){
+  $("reset").click();
+  for(const k of keys){
+    if(k.startsWith("P_")) $("preset").value=k.slice(2);
+    else if(k==="vol15") $("vr").value=1.5;
+    else if(k==="adx25") $("adx").value=25;
+    else { const c=document.querySelector(`.flag[value="${k}"]`); if(c) c.checked=true; }
+  }
+  $("adv").open = keys.some(k=>!k.startsWith("P_"));
+  sortKey=null; render(); $("btBox").hidden=true;
+  document.querySelector(".tablewrap").scrollIntoView({behavior:"smooth"});
+}
+function stable(r){ return r.lift_h1!=null && r.lift_h2!=null && r.lift_h1>=1.1 && r.lift_h2>=1.1; }
+function btRow(r, keys){
+  const ok=keys.every(canApply), few=r.n<300;
+  const st=r.lift_h1==null||r.lift_h2==null ? "–" : `${r.lift_h1} / ${r.lift_h2}`;
+  return `<tr class="${ok?"click":""}" data-keys="${keys.join(",")}">
+    <td class="l">${r.name}${few?' <span class="tag">樣本少</span>':""}${stable(r)&&r.lift>=1.2&&!few?' <span class="tag good">穩定有效</span>':""}</td>
+    <td>${r.n.toLocaleString()}</td><td>${fmt(r.p_big,1)}%</td>
+    <td class="${r.lift>=1.2?"good":""}">${fmt(r.lift,2)}×</td><td>${st}</td>
+    <td class="${r.r5>0?"pos":"neg"}">${fmt(r.r5,2)}%</td><td class="${r.r20>0?"pos":"neg"}">${fmt(r.r20,2)}%</td>
+    <td>${fmt(r.win20,1)}%</td><td>${ok?"套用 →":""}</td></tr>`;
+}
+function renderBT(){
+  const b=BT, head=`<tr><th class="l">條件</th><th>樣本數</th><th>10日內漲≥${b.big}%機率</th><th>倍數</th><th>穩定度（前半／後半）</th><th>平均5日報酬</th><th>平均20日報酬</th><th>20日勝率</th><th></th></tr>`;
+  const sigs=[...b.signals].sort((x,y)=>btSort==="lift"?cmpNum(y.lift,x.lift):cmpNum(y.r20,x.r20));
+  const best=sigs.filter(r=>r.n>=300 && r.lift>=1.2 && stable(r)).slice(0,6);
+  $("btBox").innerHTML=`
+   <div class="chartHead"><h2>回測：出現訊號後，10 個交易日內漲 ${b.big}% 以上的機率</h2><button id="btClose">關閉</button></div>
+   <p class="hint">期間 ${b.period?b.period.join(" ～ "):"–"}（籌碼 ${b.chip_period?b.chip_period.join(" ～ "):"資料累積中"}），${b.n_stocks} 檔，
+   只計入 20 日均量 ≥ ${b.min_vol} 張、股價 ≥ 10 元的日子。<b>基準</b>：任一天隨機挑一檔，10 日內漲 ${b.big}% 的機率是 ${b.baseline.p_big}%
+   （籌碼類以 ${b.baseline_chip.p_big??"–"}% 為基準）。<b>倍數</b>＝訊號機率 ÷ 基準，1.5× 代表比亂挑高 50%。
+   <b>穩定度</b>＝把期間切成前後兩半各算一次倍數，兩半都 ≥ 1.1 才標「穩定有效」。更新於 ${b.generated}。點有「套用」的列會直接帶入篩選條件。</p>
+   <h3>建議優先使用</h3>
+   ${best.length?`<div class="tablewrap"><table><thead>${head}</thead><tbody>${best.map(r=>btRow(r,[r.key])).join("")}</tbody></table></div>`:'<p class="hint">目前沒有同時符合「樣本 ≥ 300、倍數 ≥ 1.2、前後半都有效」的條件；籌碼資料累積更久後會更準。</p>'}
+   <h3>兩兩組合（倍數最高 20 組）</h3>
+   <div class="tablewrap"><table><thead>${head}</thead><tbody>${b.combos.map(r=>btRow(r,r.keys)).join("")}</tbody></table></div>
+   <h3>全部單一條件 <select id="btSort"><option value="lift">依倍數排序</option><option value="r20">依20日報酬排序</option></select></h3>
+   <div class="tablewrap" style="max-height:50vh"><table><thead>${head}</thead><tbody>${sigs.map(r=>btRow(r,[r.key])).join("")}</tbody></table></div>
+   <p class="hint">⚠ 回測只代表過去一年的統計，市場狀況改變時結果會不同；僅涵蓋目前仍上市櫃的股票（倖存者偏差），也未計入手續費與滑價。不是投資建議。</p>`;
+  $("btSort").value=btSort; $("btSort").onchange=e=>{btSort=e.target.value; renderBT();};
+  $("btClose").onclick=()=>{$("btBox").hidden=true;};
+  $("btBox").querySelectorAll("tr.click").forEach(tr=>tr.onclick=()=>applyKeys(tr.dataset.keys.split(",")));
+}
 
 // ------------------------------------------------------------------ 線圖
 const cache={};
