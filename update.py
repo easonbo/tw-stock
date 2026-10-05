@@ -26,7 +26,7 @@ PXDIR = os.path.join(OUT, "px")
 TEST  = os.environ.get("TEST_MODE") == "1"
 INTRADAY = os.environ.get("INTRADAY") == "1"          # 盤中模式：只更新股價，籌碼沿用快取
 TZ    = ZoneInfo("Asia/Taipei")
-KEEP_ROWS, CHART_ROWS, MIN_ROWS = 320, 250, 80
+KEEP_ROWS, CHART_ROWS, MIN_ROWS = 1560, 250, 80   # 保留約 6 年日K（5 年回測＋指標暖身）
 
 IND_MAP = {
   "01":"水泥工業","02":"食品工業","03":"塑膠工業","04":"紡織纖維","05":"電機機械",
@@ -154,10 +154,13 @@ def update_history(listed):
     if TEST:
         return fake_prices(listed)
     tick = {s["code"]: s["code"] + (".TWO" if s["market"] == "上櫃" else ".TW") for s in listed}
+    marker = os.path.join(CACHE, "hist_5y.done")         # 第一次升級到 5 年歷史時，全部重抓 7 年
+    if not os.path.exists(marker) and not INTRADAY:
+        hist = {}
     have = [c for c in tick if c in hist and len(hist[c]) >= MIN_ROWS]
     need = [c for c in tick if c not in have]
     print(f"增量更新 {len(have)} 檔，完整下載 {len(need)} 檔")
-    for codes, period in ((have, "5d" if INTRADAY else "1mo"), (need, "18mo")):
+    for codes, period in ((have, "5d" if INTRADAY else "1mo"), (need, "7y")):
         if not codes:
             continue
         got = yf_download([tick[c] for c in codes], period=period)
@@ -171,6 +174,8 @@ def update_history(listed):
             hist[c] = df.tail(KEEP_ROWS)
     hist = {c: hist[c] for c in tick if c in hist}
     pickle.dump(hist, open(path, "wb"))
+    if len(hist) > 0.8 * len(tick):
+        open(marker, "w").close()
     return hist
 
 # --------------------------------------------------------------------------- 籌碼
@@ -739,11 +744,80 @@ def bt_signals(df, x, code, inst, marg, shares):
                         "chip": has & f5.notna(), "date": df.index})
     return sig, out
 
+FEATS = [k for k in SIG_NAMES if not k.startswith("P_")]
+
+def fit_logit(X, y, lam=2.0, iters=30):
+    """L2 正則化邏輯斯迴歸（IRLS），回傳 [截距, 各特徵權重]。"""
+    X1 = np.hstack([np.ones((len(X), 1), dtype=np.float32), X.astype(np.float32)]); w = np.zeros(X1.shape[1])
+    R = lam * np.eye(X1.shape[1]); R[0, 0] = 0
+    for _ in range(iters):
+        p = 1 / (1 + np.exp(-np.clip(X1 @ w, -30, 30))); W = p * (1 - p)
+        H = (X1.T @ (X1 * W[:, None].astype(np.float32))).astype(float) + R
+        g = (X1.T @ (y - p).astype(np.float32)).astype(float) - R @ w
+        step = np.linalg.solve(H, g); w += step
+        if np.abs(step).max() < 1e-6:
+            break
+    return w
+
+def predict(w, X):
+    return 1 / (1 + np.exp(-np.clip(w[0] + X @ w[1:], -30, 30)))
+
+def auc(pred, y):
+    r = pd.Series(pred).rank().to_numpy(); npos = y.sum(); nneg = len(y) - npos
+    return float((r[y == 1].sum() - npos * (npos + 1) / 2) / (npos * nneg)) if npos and nneg else None
+
+def feat_matrix(sig, chip):
+    X = sig[FEATS].to_numpy(dtype=np.float32)
+    return np.hstack([X, chip.reshape(-1, 1).astype(np.float32)])     # 最後一欄：是否有籌碼資料（float32 節省記憶體）
+
+def build_model(sig, out):
+    ok = out["ok"].to_numpy(); y = out["big"].to_numpy().astype(float)
+    X = feat_matrix(sig, out["chip"].to_numpy())
+    dates = out["date"].to_numpy()
+    Xo, yo, do = X[ok], y[ok], dates[ok]
+    if len(yo) < 2000 or yo.sum() < 100:
+        return None
+    ds = pd.Series(pd.to_datetime(do)); cut = ds.quantile(0.7)
+    tr = (ds <= cut).to_numpy(); te = ~tr
+    if tr.sum() < 1000 or te.sum() < 300:
+        return None
+    w_tr = fit_logit(Xo[tr], yo[tr])
+    pt = predict(w_tr, Xo[te])
+    # 校準：把測試期依預測機率分 5 組，看實際發生率
+    calib = []
+    if te.sum() > 500:
+        qs = np.quantile(pt, [0, .2, .4, .6, .8, 1])
+        for i in range(5):
+            m = (pt >= qs[i]) & (pt <= qs[i + 1] if i == 4 else pt < qs[i + 1])
+            if m.sum():
+                calib.append(dict(pred=round(float(pt[m].mean()) * 100, 1), actual=round(float(yo[te][m].mean()) * 100, 1),
+                                  n=int(m.sum())))
+    w = fit_logit(Xo, yo)                                               # 用全部資料重新估計，給今天打分數
+    return dict(features=FEATS + ["has_chip"], coef=[round(float(v), 5) for v in w[1:]], intercept=round(float(w[0]), 5),
+                auc_test=round(auc(pt, yo[te]), 3) if te.sum() else None, calib=calib,
+                n_train=int(tr.sum()), n_test=int(te.sum()), test_from=cut.strftime("%Y-%m-%d"),
+                base_rate=round(float(yo.mean()) * 100, 1))
+
+BT_PERIODS = (1, 3, 5)                                   # 回測期間（年）
+
 def run_backtest(frames):
     if not frames:
         return None
     sig = pd.concat([f[0] for f in frames], ignore_index=True)
     out = pd.concat([f[1] for f in frames], ignore_index=True)
+    last = out.loc[out["ok"], "date"].max()
+    periods = {}
+    for yrs in BT_PERIODS:
+        m = (out["date"] > last - pd.DateOffset(years=yrs)).to_numpy()
+        res = _bt_core(sig[m].reset_index(drop=True), out[m].reset_index(drop=True), len(frames))
+        if res:
+            res["years"] = yrs
+            periods[f"{yrs}y"] = res
+            print(f"回測 {yrs} 年：期間 {res['period']}，樣本 {res['baseline']['n']:,}，基準 {res['baseline']['p_big']}%，"
+                  f"模型 AUC {res['model']['auc_test'] if res.get('model') else '–'}")
+    return dict(generated=dt.datetime.now(TZ).strftime("%Y-%m-%d %H:%M"), default="1y", periods=periods)
+
+def _bt_core(sig, out, n_stocks):
     ok = out["ok"].to_numpy(); big = out["big"].to_numpy(); r5 = out["r5"].to_numpy(); r20 = out["r20"].to_numpy()
     chip = out["chip"].to_numpy()
     dates = out["date"]; mid = dates[ok].quantile(0.5) if ok.any() else None
@@ -783,12 +857,16 @@ def run_backtest(frames):
     def base_stat(mask):
         return dict(n=int(mask.sum()), p_big=round(float(big[mask].mean()) * 100, 1) if mask.any() else None,
                     r20=round(float(np.nanmean(r20[mask])) * 100, 2) if mask.any() else None)
-    return dict(generated=dt.datetime.now(TZ).strftime("%Y-%m-%d %H:%M"),
+    try:
+        model = build_model(sig, out)
+    except Exception as e:
+        print(f"⚠ 機率模型失敗：{e}"); model = None
+    return dict(model=model, generated=dt.datetime.now(TZ).strftime("%Y-%m-%d %H:%M"),
                 period=[okd.min().strftime("%Y-%m-%d"), okd.max().strftime("%Y-%m-%d")] if len(okd) else None,
                 chip_period=[dates[base_chip].min().strftime("%Y-%m-%d"), dates[base_chip].max().strftime("%Y-%m-%d")] if base_chip.any() else None,
                 horizon=BT_HORIZON, big=BT_BIG * 100, min_vol=BT_MIN_VOL,
                 baseline=base_stat(base_all), baseline_chip=base_stat(base_chip),
-                n_stocks=len(frames), signals=res, combos=combos[:20])
+                n_stocks=n_stocks, signals=res, combos=combos[:20])
 
 # --------------------------------------------------------------------------- main
 def main():
@@ -819,7 +897,7 @@ def main():
     bt_path = os.path.join(CACHE, "backtest.json")
     do_bt = not INTRADAY and (TEST or not os.path.exists(bt_path) or
                               dt.date.fromtimestamp(os.path.getmtime(bt_path)) != dt.date.today())
-    bt_frames = []
+    bt_frames, last_feat = [], {}
     rows, errs = [], []
     for s in listed:
         df = hist.get(s["code"])
@@ -834,17 +912,43 @@ def main():
                                       snap["vol_lots"], turnover, warr)})
             json.dump(chart_json(df, x, s["code"], inst, marg), open(os.path.join(PXDIR, s["code"] + ".json"), "w"),
                       separators=(",", ":"))
-            if do_bt:
-                try:
-                    bt_frames.append(bt_signals(df, x, s["code"], inst, marg, s.get("shares")))
-                except Exception as e:
-                    errs.append(f"{s['code']} 回測: {e}")
+            try:
+                sg, oc = bt_signals(df, x, s["code"], inst, marg, s.get("shares"))
+                last_feat[s["code"]] = (sg.iloc[[-1]], oc["chip"].to_numpy()[-1:])
+                if do_bt:
+                    bt_frames.append((sg, oc))
+            except Exception as e:
+                errs.append(f"{s['code']} 回測: {e}")
         except Exception as e:
             errs.append(f"{s['code']}: {e}")
     if errs:
         print(f"⚠ 指標計算失敗 {len(errs)} 檔，例如 {errs[:3]}")
     if not rows:
         sys.exit("沒有任何股票算出指標，停止（避免把網站覆蓋成空的）")
+    if do_bt:
+        bt = run_backtest(bt_frames)
+        if bt:
+            json.dump(bt, open(bt_path, "w", encoding="utf-8"), ensure_ascii=False)
+            print("回測完成")
+    if os.path.exists(bt_path):
+        shutil.copy(bt_path, os.path.join(OUT, "backtest.json"))
+        # 用模型替每一檔打分數：10 日內漲 ≥10% 的估計機率，並列出目前成立的訊號
+        try:
+            btj = json.load(open(bt_path, encoding="utf-8"))
+            models = {p: v.get("model") for p, v in (btj.get("periods") or {}).items() if v.get("model")}
+            ws = {p: np.array([m["intercept"]] + m["coef"]) for p, m in models.items()}
+            for r in rows:
+                lf = last_feat.get(r["code"])
+                if lf is None:
+                    continue
+                sg, chip = lf
+                r["sig_on"] = [k for k in SIG_NAMES if bool(sg[k].iloc[0])]
+                X = feat_matrix(sg, chip)
+                for p, w in ws.items():
+                    r[f"prob_{p}"] = round(float(predict(w, X)[0]) * 100, 1)
+                r["prob"] = r.get("prob_1y")
+        except Exception as e:
+            print(f"⚠ 機率打分失敗：{e}")
     last = max(r["date"] for r in rows)
     meta = dict(updated=dt.datetime.now(TZ).strftime("%Y-%m-%d %H:%M"), last_date=last, intraday=INTRADAY,
                 inst_date=max((r.get("inst_date") or "" for r in rows), default="") or None,
@@ -853,13 +957,6 @@ def main():
                 n_list=len(listed), n_rows=len(rows), n_stale=sum(r["date"] < last for r in rows), rows=rows)
     json.dump(meta, open(os.path.join(OUT, "snapshot.json"), "w", encoding="utf-8"),
               ensure_ascii=False, separators=(",", ":"))
-    if do_bt:
-        bt = run_backtest(bt_frames)
-        if bt:
-            json.dump(bt, open(bt_path, "w", encoding="utf-8"), ensure_ascii=False)
-            print(f"回測完成：{bt['n_stocks']} 檔，期間 {bt['period']}，基準大漲機率 {bt['baseline']['p_big']}%")
-    if os.path.exists(bt_path):
-        shutil.copy(bt_path, os.path.join(OUT, "backtest.json"))
     print(f"完成：{len(rows)} 檔，資料日期 {last}")
 
 if __name__ == "__main__":
