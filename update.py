@@ -644,6 +644,152 @@ def chart_json(df, x, code=None, inst=None, marg=None):
                         else round(marg[k][code][j]) for k in days]
     return out
 
+# --------------------------------------------------------------------------- 回測
+# 問題：收盤時出現某訊號的股票，之後 10 個交易日內「收盤價曾比今天高 10% 以上」的機率，
+#       是否明顯高於同期所有股票的平均（基準）？倍數 lift = 訊號機率 ÷ 基準機率。
+BT_HORIZON, BT_BIG = 10, 0.10
+BT_MIN_VOL, BT_MIN_PRICE = 500, 10          # 只用 20 日均量 ≥ 500 張、股價 ≥ 10 元的日子，避免冷門股雜訊
+
+SIG_NAMES = {
+    # 技術面（key 與網頁勾選項相同，點了可以直接套用）
+    "ma_bull": ("均線多頭排列", "均線"), "above_ma20": ("站上月線", "均線"), "above_ma60": ("站上季線", "均線"),
+    "above_ma240": ("站上年線", "均線"), "ma20_bend": ("月線上彎", "均線"), "ma20_turn": ("月線剛翻揚", "均線"),
+    "ma_tangle": ("均線糾結", "均線"),
+    "kd_golden": ("KD 黃金交叉", "動能"), "kd_low_gold": ("KD 低檔黃金交叉", "動能"),
+    "macd_golden": ("MACD 黃金交叉", "動能"), "macd_pos": ("DIF 在 MACD 之上", "動能"),
+    "rsi_rebound": ("RSI 脫離超賣（站回 30）", "動能"), "dmi_bull": ("+DI > -DI", "動能"),
+    "adx25": ("ADX ≥ 25", "動能"), "obv_up": ("OBV 在均線上", "動能"),
+    "breakout20": ("突破 20 日高點", "型態"), "near_high52": ("距 52 週高 5% 內", "型態"),
+    "bb_squeeze": ("布林收斂", "布林"), "bb_up_break": ("突破布林上軌", "布林"), "bb_open": ("布林開口變大", "布林"),
+    "bb_up3_good": ("上軌 3 日斜率向上且月線未遞減", "布林"), "bb_mid_up": ("布林中軌上揚", "布林"),
+    "vol15": ("量比 ≥ 1.5", "量能"), "vol_expand": ("5 日均量 > 20 日均量", "量能"), "up3": ("連 3 日收紅", "型態"),
+    "red_vol": ("帶量紅 K（量比 ≥ 1.2）", "量能"),
+    # 籌碼
+    "c_f_buy": ("外資今日買超", "籌碼"), "c_t_buy": ("投信今日買超", "籌碼"), "c_all_buy": ("三大法人同步買超", "籌碼"),
+    "c_f_streak": ("外資連買 ≥ 3 日", "籌碼"), "c_t_streak": ("投信連買 ≥ 3 日", "籌碼"), "c_tot5": ("法人 5 日買超", "籌碼"),
+    "c_f_cap": ("外資 5 日買超 ≥ 1‰ 股本", "籌碼"), "c_t_cap": ("投信 5 日買超 ≥ 1‰ 股本", "籌碼"),
+    "c_t_cap20": ("投信 20 日買超 ≥ 5‰ 股本", "籌碼"), "c_f_flip": ("外資翻多", "籌碼"), "c_t_flip": ("投信翻多", "籌碼"),
+    "c_m_down5": ("融資 5 日減少", "籌碼"),
+    # 策略（網頁左上角的策略選股，只用前提條件）
+    "P_bottom": ("策略：低檔轉強", "策略"), "P_breakout": ("策略：量價突破", "策略"), "P_pullback": ("策略：多頭回檔", "策略"),
+    "P_squeeze": ("策略：布林收斂待發", "策略"), "P_bbup": ("策略：布林上軌擴張", "策略"),
+    "P_maflip": ("策略：月線上彎＋法人翻多", "策略"), "P_trust": ("策略：投信認養", "策略"), "P_chips": ("策略：法人買、散戶退", "策略"),
+}
+CHIP_KEYS = {k for k in SIG_NAMES if k.startswith("c_")} | {"P_maflip", "P_trust", "P_chips"}
+
+def _ws(sr, n=5):
+    d = sr.diff(); w = np.arange(n, 0, -1)
+    return sum(w[i] * d.shift(i) for i in range(n)) / w.sum()
+
+def bt_signals(df, x, code, inst, marg, shares):
+    o, h, l, c, v = (df[k] for k in ("Open", "High", "Low", "Close", "Volume"))
+    S = {}
+    ma5, ma10, ma20, ma60 = x["ma5"], x["ma10"], x["ma20"], x["ma60"]
+    S["ma_bull"] = (ma5 > ma20) & (ma20 > ma60); S["above_ma20"] = c > ma20; S["above_ma60"] = c > ma60
+    S["above_ma240"] = c > x["ma240"]
+    s20 = _ws(ma20) / c; s20p = s20.shift(5)
+    S["ma20_bend"] = (s20 > 0) & (s20 > s20p); S["ma20_turn"] = (s20 > 0) & (s20p <= 0)
+    mx = pd.concat([ma5, ma10, ma20], axis=1); S["ma_tangle"] = (mx.max(axis=1) - mx.min(axis=1)) / c < 0.02
+    K, D = x["K"], x["D"]; kg = (K.shift() < D.shift()) & (K > D)
+    S["kd_golden"] = kg; S["kd_low_gold"] = kg & (K < 30)
+    S["macd_golden"] = (x["dif"].shift() < x["macd"].shift()) & (x["dif"] > x["macd"]); S["macd_pos"] = x["dif"] > x["macd"]
+    S["rsi_rebound"] = (x["rsi"].shift() <= 30) & (x["rsi"] > 30)
+    S["dmi_bull"] = x["pdi"] > x["mdi"]; S["adx25"] = x["adx"] >= 25; S["obv_up"] = x["obv"] > x["obv_ma20"]
+    S["breakout20"] = c > h.shift().rolling(20).max()
+    S["near_high52"] = c >= 0.95 * h.rolling(250, min_periods=120).max()
+    S["bb_squeeze"] = x["bbw"] <= 1.1 * x["bbw"].rolling(120, min_periods=60).min()
+    S["bb_up_break"] = c > x["up"]; S["bb_open"] = _ws(x["bbw"]) > 0; S["bb_mid_up"] = s20 > 0
+    S["bb_up3_good"] = ((x["up"] - x["up"].shift(2)) > 0) & ((ma20.diff() >= 0).rolling(2).sum() == 2)
+    vr = v / x["vma20"].shift(); red = c > o
+    S["vol15"] = vr >= 1.5; S["vol_expand"] = x["vma5"] > x["vma20"]; S["up3"] = (c.diff() > 0).rolling(3).sum() == 3
+    S["red_vol"] = red & (vr >= 1.2)
+    # 策略前提
+    hist = x["dif"] - x["macd"]
+    low60 = c / l.rolling(60).min() - 1; ret60 = c / c.shift(60) - 1
+    bot_base = (low60 <= 0.15) & ((c < ma60) | (ret60 < -0.10)) & ((x["rsi"].rolling(10).min() < 35) | (K.rolling(5).min() < 25))
+    bot_sc = (kg & (K < 40)).astype(int) + ((hist.shift() < 0) & (hist > hist.shift())).astype(int) \
+        + ((c.shift() < ma5.shift()) & (c > ma5)).astype(int) + S["red_vol"].astype(int) + S["rsi_rebound"].astype(int) \
+        + S["obv_up"].astype(int)
+    S["P_bottom"] = bot_base & (bot_sc >= 2)
+    S["P_breakout"] = S["breakout20"] & (vr >= 1.5) & red
+    S["P_pullback"] = (ma20 > ma60) & (ma60 > ma60.shift(20)) & (x["bias20"] >= -3) & (x["bias20"] <= 2) & (K < 50)
+    S["P_squeeze"] = S["bb_squeeze"]; S["P_bbup"] = S["bb_up3_good"]
+    # 籌碼（以日期對齊；沒有籌碼資料的日子為 NaN → 不列入籌碼類統計）
+    days = [d.strftime("%Y-%m-%d") for d in df.index]
+    ser = lambda j: pd.Series([(inst.get(d) or {}).get(code, [np.nan] * 4)[j] for d in days], index=df.index, dtype=float)
+    f, t, dd = ser(0), ser(1), ser(2)
+    has = f.notna()
+    f5, t5, t20 = f.rolling(5).sum(), t.rolling(5).sum(), t.rolling(20).sum()
+    lots = shares / 1000 if shares else np.nan
+    S["c_f_buy"] = f > 0; S["c_t_buy"] = t > 0; S["c_all_buy"] = (f > 0) & (t > 0) & (dd > 0)
+    S["c_f_streak"] = (f > 0).rolling(3).sum() == 3; S["c_t_streak"] = (t > 0).rolling(3).sum() == 3
+    S["c_tot5"] = (f + t + dd).rolling(5).sum() > 0
+    S["c_f_cap"] = f5 / lots * 1000 >= 1; S["c_t_cap"] = t5 / lots * 1000 >= 1; S["c_t_cap20"] = t20 / lots * 1000 >= 5
+    S["c_f_flip"] = (f5 > 0) & ~(f5.shift(5) > 0); S["c_t_flip"] = (t5 > 0) & ~(t5.shift(5) > 0)
+    mb = pd.Series([(marg.get(d) or {}).get(code, [np.nan] * 4)[0] for d in days], index=df.index, dtype=float)
+    S["c_m_down5"] = (mb - mb.shift(5)) < 0
+    S["P_maflip"] = S["ma20_bend"] & (S["c_f_flip"] | S["c_t_flip"] | ((f > 0).rolling(2).sum() == 2) | ((t > 0).rolling(2).sum() == 2))
+    S["P_trust"] = S["c_t_streak"] & (t5 > 0)
+    S["P_chips"] = S["c_tot5"] & S["c_m_down5"]
+    sig = pd.DataFrame(S).fillna(False).astype(bool)
+    # 結果：未來 10 日內最高收盤漲幅、5／20 日報酬
+    fmax = c[::-1].rolling(BT_HORIZON).max()[::-1].shift(-1) / c - 1
+    out = pd.DataFrame({"big": fmax >= BT_BIG, "r5": c.shift(-5) / c - 1, "r20": c.shift(-20) / c - 1,
+                        "ok": (x["vma20"] / 1000 >= BT_MIN_VOL) & (c >= BT_MIN_PRICE) & fmax.notna() & x["ma60"].notna(),
+                        "chip": has & f5.notna(), "date": df.index})
+    return sig, out
+
+def run_backtest(frames):
+    if not frames:
+        return None
+    sig = pd.concat([f[0] for f in frames], ignore_index=True)
+    out = pd.concat([f[1] for f in frames], ignore_index=True)
+    ok = out["ok"].to_numpy(); big = out["big"].to_numpy(); r5 = out["r5"].to_numpy(); r20 = out["r20"].to_numpy()
+    chip = out["chip"].to_numpy()
+    dates = out["date"]; mid = dates[ok].quantile(0.5) if ok.any() else None
+    h1 = (dates <= mid).to_numpy() if mid is not None else ok
+    def stat(mask, base_mask):
+        m = mask & base_mask
+        n = int(m.sum())
+        if n == 0:
+            return None
+        p = big[m].mean(); pb = big[base_mask].mean()
+        r20v = r20[m]; r20v = r20v[~np.isnan(r20v)]
+        lift_half = []
+        for half in (h1, ~h1):
+            mm, bb = m & half, base_mask & half
+            lift_half.append(round(float(big[mm].mean() / big[bb].mean()), 2) if mm.sum() >= 30 and big[bb].mean() > 0 else None)
+        return dict(n=n, p_big=round(float(p) * 100, 1), lift=round(float(p / pb), 2) if pb > 0 else None,
+                    r5=round(float(np.nanmean(r5[m])) * 100, 2), r20=round(float(np.nanmean(r20v)) * 100, 2) if len(r20v) else None,
+                    win20=round(float((r20v > 0).mean()) * 100, 1) if len(r20v) else None,
+                    lift_h1=lift_half[0], lift_h2=lift_half[1])
+    base_all, base_chip = ok, ok & chip
+    res = []
+    for k, (name, grp) in SIG_NAMES.items():
+        st = stat(sig[k].to_numpy(), base_chip if k in CHIP_KEYS else base_all)
+        if st:
+            res.append(dict(key=k, name=name, group=grp, chip=k in CHIP_KEYS, **st))
+    # 兩兩組合：取樣本足夠、倍數最高的 12 個單一訊號（排除策略）互相搭配
+    top = [r for r in sorted(res, key=lambda r: -(r["lift"] or 0)) if r["n"] >= 300 and not r["key"].startswith("P_")][:12]
+    combos = []
+    for i in range(len(top)):
+        for j in range(i + 1, len(top)):
+            a, b = top[i]["key"], top[j]["key"]
+            st = stat(sig[a].to_numpy() & sig[b].to_numpy(), base_chip if (a in CHIP_KEYS or b in CHIP_KEYS) else base_all)
+            if st and st["n"] >= 100:
+                combos.append(dict(keys=[a, b], name=f"{SIG_NAMES[a][0]} ＋ {SIG_NAMES[b][0]}", **st))
+    combos.sort(key=lambda r: -(r["lift"] or 0))
+    okd = dates[ok]
+    def base_stat(mask):
+        return dict(n=int(mask.sum()), p_big=round(float(big[mask].mean()) * 100, 1) if mask.any() else None,
+                    r20=round(float(np.nanmean(r20[mask])) * 100, 2) if mask.any() else None)
+    return dict(generated=dt.datetime.now(TZ).strftime("%Y-%m-%d %H:%M"),
+                period=[okd.min().strftime("%Y-%m-%d"), okd.max().strftime("%Y-%m-%d")] if len(okd) else None,
+                chip_period=[dates[base_chip].min().strftime("%Y-%m-%d"), dates[base_chip].max().strftime("%Y-%m-%d")] if base_chip.any() else None,
+                horizon=BT_HORIZON, big=BT_BIG * 100, min_vol=BT_MIN_VOL,
+                baseline=base_stat(base_all), baseline_chip=base_stat(base_chip),
+                n_stocks=len(frames), signals=res, combos=combos[:20])
+
 # --------------------------------------------------------------------------- main
 def main():
     os.makedirs(CACHE, exist_ok=True)
@@ -670,6 +816,10 @@ def main():
     except Exception as e:                                  # 籌碼失敗不影響技術面
         print(f"⚠ 籌碼資料更新失敗：{e}")
         inst, marg, warr = {}, {}, {}
+    bt_path = os.path.join(CACHE, "backtest.json")
+    do_bt = not INTRADAY and (TEST or not os.path.exists(bt_path) or
+                              dt.date.fromtimestamp(os.path.getmtime(bt_path)) != dt.date.today())
+    bt_frames = []
     rows, errs = [], []
     for s in listed:
         df = hist.get(s["code"])
@@ -684,6 +834,11 @@ def main():
                                       snap["vol_lots"], turnover, warr)})
             json.dump(chart_json(df, x, s["code"], inst, marg), open(os.path.join(PXDIR, s["code"] + ".json"), "w"),
                       separators=(",", ":"))
+            if do_bt:
+                try:
+                    bt_frames.append(bt_signals(df, x, s["code"], inst, marg, s.get("shares")))
+                except Exception as e:
+                    errs.append(f"{s['code']} 回測: {e}")
         except Exception as e:
             errs.append(f"{s['code']}: {e}")
     if errs:
@@ -698,6 +853,13 @@ def main():
                 n_list=len(listed), n_rows=len(rows), n_stale=sum(r["date"] < last for r in rows), rows=rows)
     json.dump(meta, open(os.path.join(OUT, "snapshot.json"), "w", encoding="utf-8"),
               ensure_ascii=False, separators=(",", ":"))
+    if do_bt:
+        bt = run_backtest(bt_frames)
+        if bt:
+            json.dump(bt, open(bt_path, "w", encoding="utf-8"), ensure_ascii=False)
+            print(f"回測完成：{bt['n_stocks']} 檔，期間 {bt['period']}，基準大漲機率 {bt['baseline']['p_big']}%")
+    if os.path.exists(bt_path):
+        shutil.copy(bt_path, os.path.join(OUT, "backtest.json"))
     print(f"完成：{len(rows)} 檔，資料日期 {last}")
 
 if __name__ == "__main__":
