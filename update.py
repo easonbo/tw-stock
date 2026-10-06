@@ -158,6 +158,23 @@ SJ_INDEX = {}
 # --------------------------------------------------------------------------- 大盤指數
 INDEX_DEF = [("TAIEX", "加權指數", "^TWII"), ("TPEX", "櫃買指數", "^TWOII")]
 
+def tpex_index_official():
+    """櫃買中心 OpenAPI tpex_index（盤後資料）：回傳 close/chg/chg_pct/date/spark。"""
+    data = get_json("https://www.tpex.org.tw/openapi/v1/tpex_index", timeout=60)
+    if not isinstance(data, list) or not data:
+        print("⚠ 櫃買指數官方資料取得失敗"); return {}
+    rows = sorted(((_iso(x.get("Date")), to_num(x.get("Close")), to_num(x.get("Change"))) for x in data),
+                  key=lambda r: r[0] or "")
+    rows = [r for r in rows if r[0] and not np.isnan(r[1])]
+    if not rows:
+        return {}
+    d, c, ch = rows[-1]
+    if np.isnan(ch) and len(rows) >= 2:
+        ch = c - rows[-2][1]
+    prev = c - ch
+    return dict(close=round(c, 2), chg=round(ch, 2), chg_pct=round(ch / prev * 100, 2) if prev else None,
+                date=d, spark=[round(r[1], 2) for r in rows[-30:]], source="櫃買中心")
+
 def fetch_indices():
     """回傳 [{key, name, close, chg, chg_pct, date, spark}]；永豐盤中快照優先，其餘用 Yahoo。"""
     out = []
@@ -183,6 +200,8 @@ def fetch_indices():
         if len(c) >= 2:
             item.update(close=round(float(c.iloc[-1]), 2), chg=round(float(c.iloc[-1] - c.iloc[-2]), 2),
                         chg_pct=round(float(c.iloc[-1] / c.iloc[-2] - 1) * 100, 2), date=c.index[-1].strftime("%Y-%m-%d"))
+        if key == "TPEX" and (item["close"] is None or (item["date"] or "") < (out[0]["date"] if out and out[0]["date"] else "")):
+            item.update(tpex_index_official())                    # Yahoo 沒有或較舊時，改用櫃買中心官方資料
         sj = SJ_INDEX.get(key)
         if sj:                                                    # 永豐即時快照覆蓋最新值
             item.update(close=round(sj["close"], 2), chg=round(sj["chg"], 2), chg_pct=round(sj["chg_pct"], 2),
