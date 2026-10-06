@@ -292,7 +292,7 @@ let DATA=[], META={}, sortKey=null, sortDir=-1, current=null, lastRows=[];
 fetch("data/snapshot.json?t="+Date.now()).then(r=>{ if(!r.ok) throw new Error(r.status); return r.json(); }).then(j=>{
   META=j;
   DATA=j.rows.map(r=>{ for(const k in r) if(r[k]===null && !/^(code|name|market|industry|date|inst_date|margin_date|sup_name|w_date)$/.test(k)) r[k]=NaN; return chipFlags(r); });
-  $("status").textContent = (j.intraday?"🟢 盤中資料（非即時，約 30–60 分鐘更新）｜":"") + `股價 ${j.last_date}｜法人 ${j.inst_date||"–"}｜資券 ${j.margin_date||"–"}｜權證 ${j.warrant_date||"–"}｜更新於 ${j.updated}｜${j.n_rows} 檔`+(j.n_stale?`（${j.n_stale} 檔股價較舊）`:"");
+  $("status").textContent = (j.intraday?"🟢 盤中資料（非即時，約 30–60 分鐘更新）｜":"") + `股價 ${j.last_date}｜法人 ${j.inst_date||"–"}｜資券 ${j.margin_date||"–"}｜權證 ${j.warrant_date||"–"}｜更新於 ${j.updated}${j.price_source?"（"+j.price_source+"）":""}｜${j.n_rows} 檔`+(j.n_stale?`（${j.n_stale} 檔股價較舊）`:"");
   renderBreadth();
   loadBT().then(()=>{ computeProbs(); render(); });
   [...new Set(DATA.map(r=>r.industry))].sort((a,b)=>a.localeCompare(b,"zh-Hant")).forEach(i=>$("ind").add(new Option(i,i)));
@@ -320,6 +320,20 @@ $("sr").onchange = $("sub").onchange = $("bb").onchange = ()=> current && drawCh
 $("closeChart").onclick = ()=>{ $("chartBox").hidden=true; current=null; };
 
 // ------------------------------------------------------------------ 漲跌家數（依本網站的上市櫃一般股計算）
+function renderIndices(){
+  return (META.indices||[]).map(ix=>{
+    if(!isNum(ix.close)) return `<div class="bcard"><div class="t"><b>${ix.name}</b><span class="hint">暫無資料</span></div></div>`;
+    const cls=ix.chg>0?"pos":ix.chg<0?"neg":"", arrow=ix.chg>0?"▲":ix.chg<0?"▼":"－";
+    const sp=(ix.spark||[]).filter(isNum); let svg="";
+    if(sp.length>1){ const mn=Math.min(...sp), mx=Math.max(...sp), W=140, H=34;
+      const pts=sp.map((v,i)=>`${(i/(sp.length-1)*W).toFixed(1)},${(H-(v-mn)/((mx-mn)||1)*H).toFixed(1)}`).join(" ");
+      svg=`<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" style="flex:none"><polyline fill="none" stroke="${ix.chg>=0?"var(--up)":"var(--dn)"}" stroke-width="1.6" points="${pts}"/></svg>`; }
+    return `<div class="bcard" style="display:flex;justify-content:space-between;align-items:center;gap:10px">
+      <div><div class="t"><b>${ix.name}</b><span class="hint">${ix.date||""}${ix.time?" "+ix.time:""}${ix.source?"（"+ix.source+"）":""}</span></div>
+      <div style="font-size:24px;font-weight:700;font-variant-numeric:tabular-nums" class="${cls}">${ix.close.toLocaleString("zh-TW",{minimumFractionDigits:2,maximumFractionDigits:2})}</div>
+      <div class="${cls}" style="font-variant-numeric:tabular-nums">${arrow} ${fmt(Math.abs(ix.chg),2)}（${ix.chg>0?"+":""}${fmt(ix.chg_pct,2)}%）</div></div>${svg}</div>`;
+  }).join("");
+}
 function renderBreadth(){
   const html=["上市","上櫃"].map(mkt=>{
     const rs=DATA.filter(r=>r.market===mkt && isNum(r.chg_pct) && r.date===META.last_date);
@@ -334,7 +348,7 @@ function renderBreadth(){
         <span class="hint">漲跌比 ${dn?fmt(up/dn,2):"–"}</span></div>
       <div class="bbar"><i style="width:${pu}%;background:var(--up)"></i><i style="width:${pf}%;background:var(--mute)"></i><i style="width:${pd}%;background:var(--dn)"></i></div></div>`;
   }).join("");
-  $("breadth").innerHTML = html + (html?`<div class="hint" style="flex-basis:100%">漲跌家數依本網站收錄的上市櫃一般股計算（不含 ETF、權證、特別股及上市未滿 80 個交易日的股票），漲停／跌停以漲跌幅 ≥ 9.5% 估算，與交易所公布數字可能略有差異。${META.intraday?"盤中資料，非即時。":""}</div>`:"");
+  $("breadth").innerHTML = renderIndices() + html + (html?`<div class="hint" style="flex-basis:100%">漲跌家數依本網站收錄的上市櫃一般股計算（不含 ETF、權證、特別股及上市未滿 80 個交易日的股票），漲停／跌停以漲跌幅 ≥ 9.5% 估算，與交易所公布數字可能略有差異。${META.intraday?"盤中資料，非即時。":""}</div>`:"");
 }
 
 // ------------------------------------------------------------------ 篩選
@@ -480,6 +494,7 @@ function renderBT(){
    只計入 20 日均量 ≥ ${b.min_vol} 張、股價 ≥ 10 元的日子。<b>基準</b>：任一天隨機挑一檔，${b.horizon} 日內漲 ${b.big}% 的機率是 ${b.baseline.p_big}%
    （籌碼類以 ${b.baseline_chip.p_big??"–"}% 為基準）。<b>倍數</b>＝訊號機率 ÷ 基準，1.5× 代表比亂挑高 50%。
    <b>穩定度</b>＝把期間切成前後兩半各算一次倍數，兩半都 ≥ 1.1 才標「穩定有效」。更新於 ${b.generated}。點有「套用」的列會直接帶入篩選條件。</p>
+   ${b.model?`<h3>上漲機率模型的可信度</h3>${modelBox(b.model)}`:""}
    <h3>建議優先使用</h3>
    ${best.length?`<div class="tablewrap"><table><thead>${head}</thead><tbody>${best.map(r=>btRow(r,[r.key])).join("")}</tbody></table></div>`:'<p class="hint">目前沒有同時符合「樣本 ≥ 300、倍數 ≥ 1.2、前後半都有效」的條件；籌碼資料累積更久後會更準。</p>'}
    <h3>兩兩組合（倍數最高 20 組）</h3>
@@ -512,9 +527,7 @@ async function showDiag(r){
    ${isNum(prob)?`<div class="gauge"><span class="big ${lift>=1.3?"pos":""}">${fmt(prob,1)}%</span>
      <span>基準 ${base}%（隨機挑一檔）｜<b>${fmt(lift,2)} 倍</b>｜高於今天 ${pctile}% 的股票</span></div>
      <div class="bar"><i style="width:${Math.min(100,prob*2)}%"></i></div>
-     <p class="hint">模型：用過去一年「哪些訊號同時出現」對「之後 ${H} 日內是否漲 ≥${T}%」做邏輯斯迴歸。以 ${m.test_from} 之後的資料做樣本外測試，AUC ${m.auc_test??"–"}
-     （0.5＝跟亂猜一樣，0.6 以上算有一定鑑別力）。${m.calib&&m.calib.length?"樣本外校準："+m.calib.map(c=>`預測 ${c.pred}% → 實際 ${c.actual}%`).join("、")+"。":""}
-     機率是統計上的傾向，不是保證，也不是投資建議。</p>`
+     ${modelBox(m)}`
    :'<p class="hint">尚無模型估計（回測尚未產生，或這檔股票資料不足 80 天）。</p>'}
    <h3>目前成立的訊號（${on.length} 個）與歷史表現</h3>
    ${on.length?`<div class="tablewrap" style="max-height:260px"><table><thead><tr><th class="l">訊號</th><th>歷史 ${H} 日內漲≥${T}% 機率</th><th>倍數</th><th>穩定度</th><th>樣本</th></tr></thead><tbody>${sigRows}</tbody></table></div>`:'<p class="hint">目前沒有任何回測訊號成立。</p>'}
@@ -579,6 +592,23 @@ function scenarioHTML(r, stats){
       <div class="kv"><span>空間比較</span><span>${rr}</span></div></div>
    </div>
    <p class="hint">以上由均線、KD／RSI／MACD、法人與 CDP 等規則自動整理，用來快速掌握「現在在哪、上下關卡在哪」。是否進出場、部位大小與停損請自行判斷；我不是投資顧問，這些也不是買賣建議。</p>`;
+}
+// ---- 模型可信度：AUC 與校準（樣本外測試）
+function aucRate(a){ return !isNum(a) ? ["–",""] : a<0.53 ? ["跟亂猜差不多","lv-bad"] : a<0.58 ? ["鑑別力有限","lv-warn"] : a<0.65 ? ["有一定鑑別力","lv-good"] : ["鑑別力不錯","lv-good"]; }
+function modelBox(m){
+  if(!m) return "";
+  const [rt,cls]=aucRate(m.auc_test);
+  const cal=(m.calib||[]).map((c,i)=>`<tr><td class="l">第 ${i+1} 組${i===0?"（最低）":i===m.calib.length-1?"（最高）":""}</td><td>${fmt(c.pred,1)}%</td><td>${fmt(c.actual,1)}%</td><td>${(c.n||0).toLocaleString()}</td></tr>`).join("");
+  return `<div class="dgrid" style="margin-top:8px">
+    <div class="dbox"><b>模型可信度（樣本外測試）</b>
+      <div class="kv"><span>AUC</span><span class="${cls}">${m.auc_test??"–"}｜${rt}</span></div>
+      <div class="kv"><span>測試期間</span><span>${m.test_from} 之後</span></div>
+      <div class="kv"><span>訓練／測試樣本</span><span>${(m.n_train||0).toLocaleString()}／${(m.n_test||0).toLocaleString()}</span></div>
+      <p class="hint" style="margin:6px 0 0">AUC：隨機挑一檔「後來達標」和一檔「沒達標」的股票，模型給前者較高機率的比例。0.5＝亂猜，0.6 以上有一定鑑別力，0.7 以上不錯。測試期間的資料沒有用來建模型，所以能看出模型對「沒看過的行情」準不準。</p></div>
+    ${cal?`<div class="dbox"><b>校準：模型說的機率 vs 實際發生</b>
+      <table style="font-size:13px"><thead><tr><th class="l">依預測機率分 5 組</th><th>模型預測</th><th>實際發生</th><th>樣本</th></tr></thead><tbody>${cal}</tbody></table>
+      <p class="hint" style="margin:6px 0 0">兩欄越接近，機率越可信；由上到下「實際發生」應該逐組變高，代表模型排序有效。</p></div>`:""}
+  </div>`;
 }
 function openStock(r){ current={code:r.code,name:r.name,row:r}; showDiag(r); drawChart(r.code,r.name); }
 $("q").addEventListener("keydown",e=>{
