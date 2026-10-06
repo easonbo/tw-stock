@@ -13,6 +13,13 @@ body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 -apple-system,"
 header{display:flex;flex-wrap:wrap;align-items:baseline;gap:12px;padding:14px 20px;border-bottom:1px solid var(--line);background:var(--card)}
 header h1{font-size:18px;margin:0}
 #status{color:var(--mute);font-size:13px}
+#breadth{display:flex;flex-wrap:wrap;gap:12px;padding:12px 20px 0}
+.bcard{flex:1 1 320px;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px 14px}
+.bcard .t{display:flex;justify-content:space-between;align-items:baseline;gap:8px;flex-wrap:wrap}
+.bcard .t b{font-size:15px}
+.bnum{display:flex;gap:14px;flex-wrap:wrap;font-size:13.5px;margin-top:4px;font-variant-numeric:tabular-nums}
+.bbar{display:flex;height:8px;border-radius:4px;overflow:hidden;margin-top:8px;background:var(--line)}
+.bbar i{display:block;height:100%}
 .layout{display:grid;grid-template-columns:280px 1fr;gap:16px;padding:16px 20px;align-items:start}
 @media (max-width:860px){.layout{grid-template-columns:1fr;padding:12px}}
 aside,.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px}
@@ -38,6 +45,10 @@ tbody tr{cursor:pointer}tbody tr:hover,tbody tr.sel{background:var(--hl)}
 #btBox table td,#btBox table th{font-size:13px}
 #btBox tr.click{cursor:pointer}#btBox tr.click:hover{background:var(--hl)}
 #btBox h3,#diag h3{font-size:15px;margin:14px 0 6px}
+.pfin{width:100%;min-height:96px;font:13px/1.5 ui-monospace,Menlo,monospace;padding:8px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--fg)}
+.pill{display:inline-block;font-size:12px;padding:1px 8px;border-radius:999px;margin:1px 2px;border:1px solid var(--line)}
+.pill.bad{color:var(--dn);border-color:var(--dn)}.pill.ok{color:var(--up);border-color:var(--up)}
+.lv-good{color:var(--up);font-weight:700}.lv-warn{color:#c77c00;font-weight:700}.lv-bad{color:var(--dn);font-weight:700}
 .dgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:10px}
 .dbox{border:1px solid var(--line);border-radius:8px;padding:8px 10px}
 .dbox b{display:block;margin-bottom:4px}
@@ -67,7 +78,10 @@ tbody tr{cursor:pointer}tbody tr:hover,tbody tr.sel{background:var(--hl)}
       <option value="1y">統計期間：近 1 年</option><option value="3y">統計期間：近 3 年</option><option value="5y">統計期間：近 5 年</option></select>
     <select id="btH" title="期間"><option value="5">5 個交易日內</option><option value="10" selected>10 個交易日內</option><option value="20">20 個交易日內</option></select>
     <select id="btT" title="漲幅門檻"><option value="5">漲 ≥ 5%</option><option value="10" selected>漲 ≥ 10%</option><option value="15">漲 ≥ 15%</option></select>
-    <button id="btBtn">📊 回測：哪些指標有效</button></span></header>
+    <button id="pfBtn">💼 持股健檢</button>
+    <button id="btBtn">📊 回測：哪些指標有效</button>
+    <a href="guide.html" target="_blank" rel="noopener" style="color:var(--acc);text-decoration:none;font-weight:600;white-space:nowrap">📖 指標說明</a></span></header>
+<div id="breadth"></div>
 <div class="layout">
 <aside>
   <label for="preset">策略選股</label>
@@ -103,6 +117,7 @@ tbody tr{cursor:pointer}tbody tr:hover,tbody tr.sel{background:var(--hl)}
 </aside>
 
 <section>
+  <div id="pfBox" class="card" hidden style="margin-bottom:16px"></div>
   <div id="btBox" class="card" hidden style="margin-bottom:16px"></div>
   <div id="diag" class="card" hidden style="margin-bottom:16px"></div>
   <div id="chartBox" class="card" hidden>
@@ -278,6 +293,7 @@ fetch("data/snapshot.json?t="+Date.now()).then(r=>{ if(!r.ok) throw new Error(r.
   META=j;
   DATA=j.rows.map(r=>{ for(const k in r) if(r[k]===null && !/^(code|name|market|industry|date|inst_date|margin_date|sup_name|w_date)$/.test(k)) r[k]=NaN; return chipFlags(r); });
   $("status").textContent = (j.intraday?"🟢 盤中資料（非即時，約 30–60 分鐘更新）｜":"") + `股價 ${j.last_date}｜法人 ${j.inst_date||"–"}｜資券 ${j.margin_date||"–"}｜權證 ${j.warrant_date||"–"}｜更新於 ${j.updated}｜${j.n_rows} 檔`+(j.n_stale?`（${j.n_stale} 檔股價較舊）`:"");
+  renderBreadth();
   loadBT().then(()=>{ computeProbs(); render(); });
   [...new Set(DATA.map(r=>r.industry))].sort((a,b)=>a.localeCompare(b,"zh-Hant")).forEach(i=>$("ind").add(new Option(i,i)));
   render();
@@ -302,6 +318,24 @@ $("reset").onclick = ()=>{
 $("view").onchange = render;
 $("sr").onchange = $("sub").onchange = $("bb").onchange = ()=> current && drawChart(current.code, current.name);
 $("closeChart").onclick = ()=>{ $("chartBox").hidden=true; current=null; };
+
+// ------------------------------------------------------------------ 漲跌家數（依本網站的上市櫃一般股計算）
+function renderBreadth(){
+  const html=["上市","上櫃"].map(mkt=>{
+    const rs=DATA.filter(r=>r.market===mkt && isNum(r.chg_pct) && r.date===META.last_date);
+    const n=rs.length; if(!n) return "";
+    const up=rs.filter(r=>r.chg_pct>0).length, dn=rs.filter(r=>r.chg_pct<0).length, fl=n-up-dn;
+    const lu=rs.filter(r=>r.chg_pct>=9.5).length, ld=rs.filter(r=>r.chg_pct<=-9.5).length;
+    const pu=up/n*100, pd=dn/n*100, pf=fl/n*100;
+    const tone = pu>=60?"偏多":pd>=60?"偏空":"多空分歧";
+    return `<div class="bcard"><div class="t"><b>${mkt}</b><span class="hint">共 ${n.toLocaleString()} 檔｜${tone}</span></div>
+      <div class="bnum"><span class="pos">▲ 上漲 ${up}（${fmt(pu,1)}%）</span><span class="neg">▼ 下跌 ${dn}（${fmt(pd,1)}%）</span>
+        <span>平盤 ${fl}（${fmt(pf,1)}%）</span><span class="hint">漲停 ${lu}｜跌停 ${ld}</span>
+        <span class="hint">漲跌比 ${dn?fmt(up/dn,2):"–"}</span></div>
+      <div class="bbar"><i style="width:${pu}%;background:var(--up)"></i><i style="width:${pf}%;background:var(--mute)"></i><i style="width:${pd}%;background:var(--dn)"></i></div></div>`;
+  }).join("");
+  $("breadth").innerHTML = html + (html?`<div class="hint" style="flex-basis:100%">漲跌家數依本網站收錄的上市櫃一般股計算（不含 ETF、權證、特別股及上市未滿 80 個交易日的股票），漲停／跌停以漲跌幅 ≥ 9.5% 估算，與交易所公布數字可能略有差異。${META.intraday?"盤中資料，非即時。":""}</div>`:"");
+}
 
 // ------------------------------------------------------------------ 篩選
 function filterRows(){
@@ -553,6 +587,92 @@ $("q").addEventListener("keydown",e=>{
   const r=DATA.find(x=>x.code===q) || DATA.find(x=>x.name.toLowerCase()===q) || DATA.find(x=>x.code.startsWith(q)||x.name.toLowerCase().includes(q));
   if(r) openStock(r); else alert("找不到這檔股票（可能上市未滿 80 個交易日或不在清單內）");
 });
+
+// ------------------------------------------------------------------ 持股健檢（資料只存在這台裝置的瀏覽器）
+const PF_KEY="tw_pf_v1";
+function pfLoad(){ try{ return JSON.parse(localStorage.getItem(PF_KEY)||"[]"); }catch(e){ return []; } }
+function pfSave(list){ try{ localStorage.setItem(PF_KEY, JSON.stringify(list)); }catch(e){} }
+function pfParse(text){
+  return text.split(/\n/).map(l=>l.trim()).filter(Boolean).map(l=>{
+    const [c,cost,sh]=l.split(/[,，\s]+/); return {code:(c||"").trim(), cost:Number(cost), shares:Number(sh||1000)};
+  }).filter(x=>x.code && x.cost>0 && x.shares>0);
+}
+function pfTrend(r){
+  if(r.close>r.ma20v && r.ma20_s>0 && r.ma20v>r.ma60v) return ["多頭","ok"];
+  if(r.close<r.ma20v && r.ma20_s<0 && r.ma20v<r.ma60v) return ["空頭","bad"];
+  if(r.close>r.ma20v && !(r.ma20_s>0)) return ["反彈中",""];
+  if(r.close<r.ma20v && r.ma20_s>0) return ["回檔中",""];
+  return ["盤整",""];
+}
+function pfNearest(r){
+  const C=r.close;
+  const S=[["做多支撐",r.sup],["月線",r.ma20v],["季線",r.ma60v],["CDP支撐",r.nl],["前20日低",r.low20]].filter(([,v])=>isNum(v)&&v<C).sort((a,b)=>b[1]-a[1])[0];
+  const R=[["前20日高",r.high20],["布林上軌",r.bb_up],["CDP壓力",r.nh],["月線",r.ma20v],["季線",r.ma60v]].filter(([,v])=>isNum(v)&&v>C).sort((a,b)=>a[1]-b[1])[0];
+  return [S,R];
+}
+function pfCheck(r, h){
+  const bad=[], good=[];
+  const ret=(r.close/h.cost-1)*100;
+  if(r.close<r.ma20v) bad.push("跌破月線"); else good.push("站上月線");
+  if(r.close<r.ma60v) bad.push("跌破季線");
+  if(r.ma20_s<0) bad.push("月線下彎"); else if(r.ma20_s>0) good.push("月線上揚");
+  if(r.bias20>10) bad.push(`乖離 ${fmt(r.bias20,1)}% 偏熱`);
+  if(r.rsi>70||r.K>80) bad.push("短線過熱");
+  if(r.hist<r.hist_prev && r.hist<0) bad.push("MACD 綠柱擴大");
+  if(isNum(r.tot5)){ if(r.tot5<0) bad.push("法人 5 日賣超"); else if(r.tot5>0) good.push("法人 5 日買超"); }
+  if(r.f_streak<=-3) bad.push(`外資連賣 ${-r.f_streak} 日`);
+  if(r.t_streak<=-3) bad.push(`投信連賣 ${-r.t_streak} 日`);
+  if(r.m_chg5>0 && r.ret20<0) bad.push("股價跌、融資增（散戶接刀）");
+  if(r.bb_up3_good) good.push("布林多方開口");
+  if(ret<=-10) bad.push(`虧損 ${fmt(-ret,1)}%`);
+  const score=good.length-bad.length;
+  const level = bad.length>=4||score<=-3 ? ["警示","lv-bad"] : bad.length>=2||score<0 ? ["留意","lv-warn"] : ["健康","lv-good"];
+  return {bad, good, level, ret};
+}
+function renderPF(){
+  const list=pfLoad(), box=$("pfBox");
+  const rows=list.map(h=>({h, r:DATA.find(x=>x.code===h.code)}));
+  let tc=0, tv=0; const ind={};
+  const trs=rows.map(({h,r},i)=>{
+    const cost=h.cost*h.shares;
+    if(!r) return `<tr><td class="l">${h.code}</td><td colspan="10" class="l warn">查無資料（可能是 ETF、興櫃，或上市未滿 80 個交易日）</td><td><button data-del="${i}">刪除</button></td></tr>`;
+    const val=r.close*h.shares; tc+=cost; tv+=val; ind[r.industry]=(ind[r.industry]||0)+val;
+    const c=pfCheck(r,h), [t,tcls]=pfTrend(r), [S,R]=pfNearest(r);
+    const pnl=val-cost;
+    return `<tr data-code="${r.code}" class="click">
+      <td class="l">${r.code} ${r.name}</td><td>${h.shares.toLocaleString()}</td><td>${fmt(h.cost,2)}</td><td>${fmt(r.close,2)}</td>
+      <td class="${pnl>0?"pos":pnl<0?"neg":""}">${Math.round(pnl).toLocaleString()}</td><td class="${c.ret>0?"pos":c.ret<0?"neg":""}">${fmt(c.ret,1)}%</td>
+      <td class="${c.level[1]}">${c.level[0]}</td><td class="${tcls==="ok"?"pos":tcls==="bad"?"neg":""}">${t}</td>
+      <td class="l reason">${c.bad.map(x=>`<span class="pill bad">${x}</span>`).join("")}${c.good.map(x=>`<span class="pill ok">${x}</span>`).join("")}</td>
+      <td>${S?`${fmt(S[1],2)}<br><span class="hint">${S[0]} ${fmt((S[1]/r.close-1)*100,1)}%</span>`:"–"}</td>
+      <td>${R?`${fmt(R[1],2)}<br><span class="hint">${R[0]} +${fmt((R[1]/r.close-1)*100,1)}%</span>`:"–"}</td>
+      <td><button data-del="${i}">刪除</button></td></tr>`;
+  }).join("");
+  const conc=Object.entries(ind).sort((a,b)=>b[1]-a[1]).map(([k,v])=>`${k} ${fmt(v/tv*100,0)}%`).join("、");
+  const maxOne=rows.filter(x=>x.r).map(({h,r})=>[r.name, r.close*h.shares/tv*100]).sort((a,b)=>b[1]-a[1])[0];
+  const topInd=Object.entries(ind).sort((a,b)=>b[1]-a[1])[0];
+  const warns=[]; if(maxOne&&maxOne[1]>30) warns.push(`單一持股「${maxOne[0]}」佔 ${fmt(maxOne[1],0)}%`);
+  if(topInd&&topInd[1]/tv>0.5&&Object.keys(ind).length>1) warns.push(`「${topInd[0]}」產業佔 ${fmt(topInd[1]/tv*100,0)}%`);
+  box.innerHTML=`
+   <div class="chartHead"><h2>💼 持股健檢</h2><button id="pfClose">關閉</button></div>
+   <p class="hint">每行一檔：<b>代號, 成本價, 股數</b>（1 張 = 1000 股），例如 <code>2330, 950, 2000</code>。資料只存在這台裝置的瀏覽器，不會上傳；換裝置時把下面的文字複製過去即可。</p>
+   <textarea id="pfIn" class="pfin" placeholder="2330, 950, 2000&#10;3017, 192, 1000">${list.map(h=>`${h.code}, ${h.cost}, ${h.shares}`).join("\n")}</textarea>
+   <p><button id="pfSaveBtn" class="primary">儲存並健檢</button></p>
+   ${list.length?`
+   <div class="dgrid" style="margin:10px 0">
+     <div class="dbox"><b>總覽</b>${kv("投入成本",Math.round(tc).toLocaleString()+" 元")}${kv("目前市值",Math.round(tv).toLocaleString()+" 元")}
+       ${kv("未實現損益",Math.round(tv-tc).toLocaleString()+" 元（"+fmt((tv/tc-1)*100,1)+"%）",null,{})}</div>
+     <div class="dbox"><b>產業分布</b><div class="hint">${conc||"–"}</div>${warns.length?`<div class="lv-warn" style="margin-top:6px">⚠ 集中度偏高：${warns.join("；")}</div>`:""}</div>
+   </div>
+   <div class="tablewrap"><table><thead><tr><th class="l">股票</th><th>股數</th><th>成本</th><th>現價</th><th>損益(元)</th><th>報酬</th><th>健檢</th><th>趨勢</th><th class="l">警示／正面訊號</th><th>最近支撐</th><th>最近壓力</th><th></th></tr></thead>
+   <tbody>${trs}</tbody></table></div>
+   <p class="hint">健檢依規則整理：「警示」＝負面訊號 ≥ 4 個；「留意」＝負面訊號 ≥ 2 個或負面多於正面；其餘為「健康」。點股票列可看個股診斷與線圖。這是資訊整理，不是買賣建議；是否續抱、停損或停利請自行判斷。</p>`:""}`;
+  $("pfClose").onclick=()=>{ box.hidden=true; };
+  $("pfSaveBtn").onclick=()=>{ pfSave(pfParse($("pfIn").value)); renderPF(); };
+  box.querySelectorAll("button[data-del]").forEach(b=>b.onclick=e=>{ e.stopPropagation(); const l=pfLoad(); l.splice(+b.dataset.del,1); pfSave(l); renderPF(); });
+  box.querySelectorAll("tr[data-code]").forEach(tr=>tr.onclick=()=>{ const r=DATA.find(x=>x.code===tr.dataset.code); if(r) openStock(r); });
+}
+$("pfBtn").onclick=()=>{ const b=$("pfBox"); if(!b.hidden){ b.hidden=true; return; } b.hidden=false; renderPF(); b.scrollIntoView({behavior:"smooth"}); };
 
 // ------------------------------------------------------------------ 線圖
 const cache={};
