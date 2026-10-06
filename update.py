@@ -149,6 +149,100 @@ def fake_prices(listed):
             "Volume": rng.uniform(5e5, 3e7, n).round()}, index=days[-n:])
     return out
 
+# --------------------------------------------------------------------------- 永豐 Shioaji 行情快照（選用）
+# 在 GitHub Secrets 設定 SJ_API_KEY / SJ_SECRET_KEY 後啟用；只用來「讀行情」，不下單。
+# 一次最多 500 檔快照，盤中與收盤後用它更新「今天」這根 K 棒；失敗時自動退回 Yahoo。
+SJ_KEY, SJ_SECRET = os.environ.get("SJ_API_KEY", "").strip(), os.environ.get("SJ_SECRET_KEY", "").strip()
+SJ_INDEX = {}
+
+# --------------------------------------------------------------------------- 大盤指數
+INDEX_DEF = [("TAIEX", "加權指數", "^TWII"), ("TPEX", "櫃買指數", "^TWOII")]
+
+def fetch_indices():
+    """回傳 [{key, name, close, chg, chg_pct, date, spark}]；永豐盤中快照優先，其餘用 Yahoo。"""
+    out = []
+    if TEST:
+        rng = np.random.default_rng(7)
+        for key, name, _ in INDEX_DEF:
+            base = 22000 if key == "TAIEX" else 250
+            sp = list(np.round(base * np.cumprod(1 + rng.normal(0, .01, 30)), 2))
+            out.append(dict(key=key, name=name, close=sp[-1], chg=round(sp[-1] - sp[-2], 2),
+                            chg_pct=round((sp[-1] / sp[-2] - 1) * 100, 2), date=dt.date.today().isoformat(), spark=sp))
+        return out
+    try:
+        import yfinance as yf
+        df = yf.download([t for _, _, t in INDEX_DEF], period="3mo", group_by="ticker", auto_adjust=False, progress=False)
+    except Exception as e:
+        print(f"⚠ 指數下載失敗：{e}"); df = None
+    for key, name, t in INDEX_DEF:
+        try:
+            c = _naive(df[t][["Close"]].dropna())["Close"] if df is not None else pd.Series(dtype=float)
+        except Exception:
+            c = pd.Series(dtype=float)
+        item = dict(key=key, name=name, close=None, chg=None, chg_pct=None, date=None, spark=[round(float(v), 2) for v in c.tail(30)])
+        if len(c) >= 2:
+            item.update(close=round(float(c.iloc[-1]), 2), chg=round(float(c.iloc[-1] - c.iloc[-2]), 2),
+                        chg_pct=round(float(c.iloc[-1] / c.iloc[-2] - 1) * 100, 2), date=c.index[-1].strftime("%Y-%m-%d"))
+        sj = SJ_INDEX.get(key)
+        if sj:                                                    # 永豐即時快照覆蓋最新值
+            item.update(close=round(sj["close"], 2), chg=round(sj["chg"], 2), chg_pct=round(sj["chg_pct"], 2),
+                        date=dt.datetime.now(TZ).date().isoformat(), time=sj["time"], source="永豐")
+            if item["spark"]:
+                item["spark"][-1] = item["close"]
+        out.append(item)
+    return out
+
+def sj_today_bars(codes):
+    """回傳 {代號: 今天的 OHLCV DataFrame（1 列）}；沒有金鑰、登入失敗或今天沒交易時回傳空 dict。"""
+    if not (SJ_KEY and SJ_SECRET) or TEST:
+        return {}
+    try:
+        import shioaji as sj
+    except Exception as e:
+        print(f"⚠ 未安裝 shioaji：{e}"); return {}
+    api = sj.Shioaji(simulation=False)
+    try:
+        api.login(api_key=SJ_KEY, secret_key=SJ_SECRET)
+    except Exception as e:
+        print(f"⚠ 永豐登入失敗，改用 Yahoo：{e}"); return {}
+    out, today = {}, pd.Timestamp(dt.datetime.now(TZ).date())
+    try:
+        contracts = []
+        for c in codes:
+            try:
+                k = api.Contracts.Stocks[c]
+                if k is not None:
+                    contracts.append(k)
+            except Exception:
+                pass
+        for i in range(0, len(contracts), 500):                  # 官方限制：每次最多 500 檔
+            for sn in api.snapshots(contracts[i:i + 500]):
+                day = pd.Timestamp(sn.ts).normalize()             # ts 為台灣當地時間
+                if day != today or not sn.total_volume or not sn.open:
+                    continue
+                out[sn.code] = pd.DataFrame(
+                    {"Open": [float(sn.open)], "High": [float(sn.high)], "Low": [float(sn.low)],
+                     "Close": [float(sn.close)], "Volume": [float(sn.total_volume) * 1000]},   # total_volume 單位為張
+                    index=pd.DatetimeIndex([today]))
+            time.sleep(1)
+        print(f"永豐行情：取得 {len(out)} 檔今日快照（共 {len(contracts)} 檔合約）")
+        try:                                                      # 加權指數（TSE 001）、櫃買指數（OTC 101）
+            idx = [api.Contracts.Indexs.TSE["001"], api.Contracts.Indexs.OTC["101"]]
+            for key, sn in zip(("TAIEX", "TPEX"), api.snapshots([k for k in idx if k is not None])):
+                if pd.Timestamp(sn.ts).normalize() == today and sn.close:
+                    SJ_INDEX[key] = dict(close=float(sn.close), chg=float(sn.change_price), chg_pct=float(sn.change_rate),
+                                         time=pd.Timestamp(sn.ts).strftime("%H:%M"))
+        except Exception as e:
+            print(f"  永豐指數快照略過：{e}")
+    except Exception as e:
+        print(f"⚠ 永豐快照失敗，改用 Yahoo：{e}")
+    finally:
+        try:
+            api.logout()
+        except Exception:
+            pass
+    return out
+
 def update_history(listed):
     path = os.path.join(CACHE, "hist.pkl")
     hist = pickle.load(open(path, "rb")) if os.path.exists(path) else {}
@@ -161,7 +255,11 @@ def update_history(listed):
     have = [c for c in tick if c in hist and len(hist[c]) >= MIN_ROWS]
     need = [c for c in tick if c not in have]
     print(f"增量更新 {len(have)} 檔，完整下載 {len(need)} 檔")
-    for codes, period in ((have, "5d" if INTRADAY else "1mo"), (need, "7y")):
+    sj_bars = sj_today_bars(list(tick))
+    jobs = [(need, "7y")]
+    if not (INTRADAY and len(sj_bars) > 0.8 * len(have)):        # 盤中若永豐快照成功，就不必再抓 Yahoo
+        jobs.insert(0, (have, "5d" if INTRADAY else "1mo"))
+    for codes, period in jobs:
         if not codes:
             continue
         got = yf_download([tick[c] for c in codes], period=period)
@@ -173,6 +271,10 @@ def update_history(listed):
             df = new if old is None else pd.concat([old, new])
             df = df[~df.index.duplicated(keep="last")].sort_index()
             hist[c] = df.tail(KEEP_ROWS)
+    for c, bar in sj_bars.items():                                # 用永豐快照覆蓋／補上今天這根 K 棒
+        if c in hist:
+            df = pd.concat([hist[c], bar])
+            hist[c] = df[~df.index.duplicated(keep="last")].sort_index().tail(KEEP_ROWS)
     hist = {c: hist[c] for c in tick if c in hist}
     pickle.dump(hist, open(path, "wb"))
     if len(hist) > 0.8 * len(tick):
@@ -963,6 +1065,8 @@ def main():
             print(f"⚠ 機率打分失敗：{e}")
     last = max(r["date"] for r in rows)
     meta = dict(updated=dt.datetime.now(TZ).strftime("%Y-%m-%d %H:%M"), last_date=last, intraday=INTRADAY,
+                price_source="永豐 Shioaji" if (SJ_KEY and SJ_SECRET) else "Yahoo Finance",
+                indices=fetch_indices(),
                 inst_date=max((r.get("inst_date") or "" for r in rows), default="") or None,
                 margin_date=max((r.get("margin_date") or "" for r in rows), default="") or None,
                 warrant_date=max((r.get("w_date") or "" for r in rows), default="") or None,
