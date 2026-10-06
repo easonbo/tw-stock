@@ -17,7 +17,8 @@ import requests
 
 sys.stdout.reconfigure(line_buffering=True)          # 讓 GitHub Actions 即時顯示進度
 START = time.time()
-CHIP_TIME_LIMIT = 35 * 60                             # 籌碼回補最多用到開始後 35 分鐘（避免超過 60 分鐘上限）
+CHIP_TIME_LIMIT = 35 * 60                             # 籌碼回補最多用到開始後 35 分鐘
+BT_TIME_LIMIT = 60 * 60                               # 開始後超過 60 分鐘就跳過回測，先把最新股價發佈出去
 
 ROOT  = os.path.dirname(os.path.abspath(__file__))
 CACHE = os.path.join(ROOT, "cache")
@@ -938,6 +939,9 @@ def main():
         print(f"⚠ 指標計算失敗 {len(errs)} 檔，例如 {errs[:3]}")
     if not rows:
         sys.exit("沒有任何股票算出指標，停止（避免把網站覆蓋成空的）")
+    if do_bt and time.time() - START > BT_TIME_LIMIT:
+        print("⚠ 本次執行時間已長，先跳過回測（下次執行再算），優先更新股價")
+        do_bt = False
     if do_bt:
         bt = run_backtest(bt_frames)
         if bt:
