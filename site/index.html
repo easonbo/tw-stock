@@ -47,6 +47,11 @@ tbody tr{cursor:pointer}tbody tr:hover,tbody tr.sel{background:var(--hl)}
 #btBox table td,#btBox table th{font-size:13px}
 #btBox tr.click{cursor:pointer}#btBox tr.click:hover{background:var(--hl)}
 #btBox h3,#diag h3{font-size:15px;margin:14px 0 6px}
+.posbar{position:relative;height:6px;border-radius:3px;background:linear-gradient(90deg,var(--dn),var(--line) 50%,var(--up));min-width:90px;margin-top:4px}
+.posbar i{position:absolute;top:-3px;width:3px;height:12px;background:var(--fg);border-radius:1px}
+.star{background:none;border:none;font-size:18px;cursor:pointer;color:#e0a800;padding:0 4px}
+.wladd{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:8px 0}
+.wladd input{padding:6px 8px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--fg);font:inherit;min-width:220px}
 .pfin{width:100%;min-height:96px;font:13px/1.5 ui-monospace,Menlo,monospace;padding:8px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--fg)}
 .pill{display:inline-block;font-size:12px;padding:1px 8px;border-radius:999px;margin:1px 2px;border:1px solid var(--line)}
 .pill.bad{color:var(--dn);border-color:var(--dn)}.pill.ok{color:var(--up);border-color:var(--up)}
@@ -80,6 +85,7 @@ tbody tr{cursor:pointer}tbody tr:hover,tbody tr.sel{background:var(--hl)}
       <option value="1y">統計期間：近 1 年</option><option value="3y">統計期間：近 3 年</option><option value="5y">統計期間：近 5 年</option></select>
     <select id="btH" title="期間"><option value="5">5 個交易日內</option><option value="10" selected>10 個交易日內</option><option value="20">20 個交易日內</option></select>
     <select id="btT" title="漲幅門檻"><option value="5">漲 ≥ 5%</option><option value="10" selected>漲 ≥ 10%</option><option value="15">漲 ≥ 15%</option></select>
+    <button id="wlBtn">⭐ 自選股</button>
     <button id="pfBtn">💼 持股健檢</button>
     <button id="btBtn">📊 回測：哪些指標有效</button>
     <a href="guide.html" target="_blank" rel="noopener" style="color:var(--acc);text-decoration:none;font-weight:600;white-space:nowrap">📖 指標說明</a></span></header>
@@ -119,6 +125,7 @@ tbody tr{cursor:pointer}tbody tr:hover,tbody tr.sel{background:var(--hl)}
 </aside>
 
 <section>
+  <div id="wlBox" class="card" hidden style="margin-bottom:16px"></div>
   <div id="pfBox" class="card" hidden style="margin-bottom:16px"></div>
   <div id="btBox" class="card" hidden style="margin-bottom:16px"></div>
   <div id="diag" class="card" hidden style="margin-bottom:16px"></div>
@@ -296,7 +303,8 @@ fetch("data/snapshot.json?t="+Date.now()).then(r=>{ if(!r.ok) throw new Error(r.
   DATA=j.rows.map(r=>{ for(const k in r) if(r[k]===null && !/^(code|name|market|industry|date|inst_date|margin_date|sup_name|w_date)$/.test(k)) r[k]=NaN; return chipFlags(r); });
   $("status").textContent = (j.intraday?"🟢 盤中資料（非即時，約 30–60 分鐘更新）｜":"") + `股價 ${j.last_date}｜法人 ${j.inst_date||"–"}｜資券 ${j.margin_date||"–"}｜權證 ${j.warrant_date||"–"}｜更新於 ${j.updated}${j.price_source?"（"+j.price_source+"）":""}｜${j.n_rows} 檔`+(j.n_stale?`（${j.n_stale} 檔股價較舊）`:"");
   renderBreadth();
-  loadBT().then(()=>{ computeProbs(); render(); });
+  loadBT().then(()=>{ computeProbs(); render(); if(!$("wlBox").hidden) renderWL(); });
+  if(location.hash==="#watch"){ $("wlBox").hidden=false; renderWL(); }
   [...new Set(DATA.map(r=>r.industry))].sort((a,b)=>a.localeCompare(b,"zh-Hant")).forEach(i=>$("ind").add(new Option(i,i)));
   render();
 }).catch(e=>{ $("status").textContent="讀不到資料（"+e.message+"）：請確認 GitHub Actions 已成功執行過一次。"; });
@@ -523,7 +531,7 @@ async function showDiag(r){
      <td class="${x.lift>=1.2?"good":x.lift<1?"neg":""}">${fmt(x.lift,2)}×</td><td>${x.lift_h1??"–"} / ${x.lift_h2??"–"}</td><td>${x.n.toLocaleString()}</td></tr>`).join("");
   const pctile = isNum(prob) ? Math.round(DATA.filter(x=>isNum(x.prob)&&x.prob<=prob).length / DATA.filter(x=>isNum(x.prob)).length*100) : null;
   box.innerHTML=`
-   <div class="chartHead"><h2>個股診斷：${r.code} ${r.name}　<span class="${r.chg_pct>0?"pos":r.chg_pct<0?"neg":""}">${fmt(r.close,2)}（${fmt(r.chg_pct,2)}%）</span></h2><button id="diagClose">關閉</button></div>
+   <div class="chartHead"><h2><button class="star" id="diagStar" title="加入／移除自選股">${wlHas(r.code)?"★":"☆"}</button>個股診斷：${r.code} ${r.name}　<span class="${r.chg_pct>0?"pos":r.chg_pct<0?"neg":""}">${fmt(r.close,2)}（${fmt(r.chg_pct,2)}%）</span></h2><button id="diagClose">關閉</button></div>
    <p class="hint">${r.market}｜${r.industry}｜股價日期 ${r.date}${r.inst_date?`｜法人 ${r.inst_date}`:""}</p>
    <h3>${TLABEL()} 的機率（模型估計，依${PLABEL[PERIOD]}資料）</h3>
    ${isNum(prob)?`<div class="gauge"><span class="big ${lift>=1.3?"pos":""}">${fmt(prob,1)}%</span>
@@ -552,6 +560,7 @@ async function showDiag(r){
       ${kv("做多支撐",isNum(r.sup)?fmt(r.sup,2)+"（"+(r.sup_name||"")+"）":"–")}${kv("距做多支撐",r.sup_dist,1,{unit:"%"})}${kv("當沖方向",r.dt_dir)}</div>
    </div>`;
   $("diagClose").onclick=()=>{ box.hidden=true; };
+  $("diagStar").onclick=()=>{ wlToggle(r.code); $("diagStar").textContent=wlHas(r.code)?"★":"☆"; if(!$("wlBox").hidden) renderWL(); };
   box.scrollIntoView({behavior:"smooth",block:"start"});
 }
 // ---- 技術面情境整理：只整理事實與條件式情境，不給買賣建議
@@ -612,6 +621,65 @@ function modelBox(m){
       <p class="hint" style="margin:6px 0 0">兩欄越接近，機率越可信；由上到下「實際發生」應該逐組變高，代表模型排序有效。</p></div>`:""}
   </div>`;
 }
+// ------------------------------------------------------------------ 自選股（存在這台裝置的瀏覽器）
+const WL_KEY="tw_wl_v1";
+function wlLoad(){ try{ return JSON.parse(localStorage.getItem(WL_KEY)||"[]"); }catch(e){ return []; } }
+function wlSave(a){ try{ localStorage.setItem(WL_KEY, JSON.stringify([...new Set(a)])); }catch(e){} }
+function wlHas(c){ return wlLoad().includes(c); }
+function wlToggle(c){ const a=wlLoad(); const i=a.indexOf(c); if(i>=0) a.splice(i,1); else a.push(c); wlSave(a); }
+// 支撐／壓力：取股價下方、上方最接近的價位（去除太接近的重複價位）
+function srLevels(r){
+  const C=r.close;
+  const S=[[`做多支撐（${r.sup_name||""}）`,r.sup],["CDP 支撐 NL",r.nl],["CDP 強支撐 AL",r.al],["月線",r.ma20v],["季線",r.ma60v],["10日線",r.ma10v],["前20日低",r.low20],["布林下軌",r.bb_dn]]
+    .filter(([,v])=>isNum(v)&&v<C).sort((a,b)=>b[1]-a[1]);
+  const R=[["前20日高",r.high20],["CDP 壓力 NH",r.nh],["CDP 強壓力 AH",r.ah],["布林上軌",r.bb_up],["月線",r.ma20v],["季線",r.ma60v],["年線",r.ma240v]]
+    .filter(([,v])=>isNum(v)&&v>C).sort((a,b)=>a[1]-b[1]);
+  const uniq=a=>a.filter((x,i)=>i===0||Math.abs(x[1]-a[i-1][1])/C>0.003).slice(0,3);
+  return {S:uniq(S), R:uniq(R)};
+}
+function lvCell(x,C){ return x?`<div>${fmt(x[1],2)} <span class="hint">${x[1]>C?"+":""}${fmt((x[1]/C-1)*100,1)}%</span></div><div class="hint" style="font-size:11.5px">${x[0]}</div>`:'<span class="hint">–</span>'; }
+function renderWL(){
+  const list=wlLoad(), box=$("wlBox");
+  const rows=list.map(c=>DATA.find(x=>x.code===c)).filter(Boolean);
+  const miss=list.filter(c=>!DATA.find(x=>x.code===c));
+  const trs=rows.map(r=>{
+    const {S,R}=srLevels(r), C=r.close, s1=S[0], r1=R[0];
+    const pos = s1&&r1 ? Math.max(0,Math.min(1,(C-s1[1])/(r1[1]-s1[1]))) : null;
+    const [t,tc]=pfTrend(r);
+    return `<tr data-code="${r.code}" class="click">
+      <td><button class="star" data-star="${r.code}" title="移除">★</button></td>
+      <td class="l">${r.code} ${r.name}<div class="hint" style="font-size:11.5px">${r.market}｜${r.industry}</div></td>
+      <td>${fmt(C,2)}</td><td class="${r.chg_pct>0?"pos":r.chg_pct<0?"neg":""}">${fmt(r.chg_pct,2)}%</td>
+      <td>${fmt(r.vol_ratio,2)}</td><td class="${tc==="ok"?"pos":tc==="bad"?"neg":""}">${t}</td>
+      <td>${isNum(r.prob)?fmt(r.prob,1)+"%":"–"}</td>
+      <td>${lvCell(S[1],C)}</td><td>${lvCell(s1,C)}</td>
+      <td style="min-width:110px">${pos!==null?`<div class="posbar"><i style="left:calc(${(pos*100).toFixed(0)}% - 1px)"></i></div><div class="hint" style="font-size:11.5px">${pos<0.25?"接近支撐":pos>0.75?"接近壓力":"區間中段"}</div>`:"–"}</td>
+      <td>${lvCell(r1,C)}</td><td>${lvCell(R[1],C)}</td>
+      <td>${r.dt_dir||"–"}</td></tr>`;
+  }).join("");
+  box.innerHTML=`
+   <div class="chartHead"><h2>⭐ 自選股：支撐與壓力</h2><button id="wlClose">關閉</button></div>
+   <p class="hint">價位依最新一次更新計算（盤中約 30 分鐘一次）。支撐取股價下方最近的價位，壓力取上方最近的價位，來源包含做多支撐、CDP、均線、布林軌道、前 20 日高低點。點任一列看個股診斷與線圖（會自動畫出支撐壓力線）。清單只存在這台裝置的瀏覽器。</p>
+   <div class="wladd"><input id="wlIn" placeholder="輸入代號或名稱，例如 2330 或 台積電"><button id="wlAdd" class="primary">加入</button>
+     <button id="wlImport">從持股健檢匯入</button><span class="hint" id="wlMsg"></span></div>
+   ${rows.length?`<div class="tablewrap"><table><thead><tr><th></th><th class="l">股票</th><th>現價</th><th>漲跌%</th><th>量比</th><th>趨勢</th><th>上漲機率</th>
+     <th>第二支撐</th><th>第一支撐</th><th>位置</th><th>第一壓力</th><th>第二壓力</th><th>當沖方向</th></tr></thead><tbody>${trs}</tbody></table></div>`
+     :'<p class="hint">還沒有自選股。在上方輸入代號加入，或在個股診斷標題旁點 ☆。</p>'}
+   ${miss.length?`<p class="hint">查無資料（可能是 ETF 或上市未滿 80 個交易日）：${miss.join("、")} <button id="wlClean">移除這些</button></p>`:""}
+   <p class="hint">支撐壓力是依規則計算的參考價位，不是買賣建議。</p>`;
+  const msg=t=>{ $("wlMsg").textContent=t; };
+  $("wlClose").onclick=()=>{ box.hidden=true; if(location.hash==="#watch") history.replaceState(null,"",location.pathname); };
+  const add=()=>{ const q=$("wlIn").value.trim().toLowerCase(); if(!q) return;
+    const r=DATA.find(x=>x.code===q)||DATA.find(x=>x.name.toLowerCase()===q)||DATA.find(x=>x.code.startsWith(q)||x.name.toLowerCase().includes(q));
+    if(!r){ msg("找不到這檔股票"); return; } const a=wlLoad(); if(!a.includes(r.code)) a.push(r.code); wlSave(a); renderWL(); };
+  $("wlAdd").onclick=add; $("wlIn").onkeydown=e=>{ if(e.key==="Enter") add(); };
+  $("wlImport").onclick=()=>{ const a=wlLoad(); pfLoad().forEach(h=>{ if(!a.includes(h.code)) a.push(h.code); }); wlSave(a); renderWL(); };
+  if($("wlClean")) $("wlClean").onclick=()=>{ wlSave(wlLoad().filter(c=>DATA.find(x=>x.code===c))); renderWL(); };
+  box.querySelectorAll("button[data-star]").forEach(b=>b.onclick=e=>{ e.stopPropagation(); wlToggle(b.dataset.star); renderWL(); });
+  box.querySelectorAll("tr[data-code]").forEach(tr=>tr.onclick=()=>{ const r=DATA.find(x=>x.code===tr.dataset.code); if(r){ $("sr").checked=true; openStock(r); } });
+}
+$("wlBtn").onclick=()=>{ const b=$("wlBox"); if(!b.hidden){ b.hidden=true; return; } b.hidden=false; renderWL(); b.scrollIntoView({behavior:"smooth"}); };
+
 function openStock(r){ current={code:r.code,name:r.name,row:r}; showDiag(r); drawChart(r.code,r.name); }
 $("q").addEventListener("keydown",e=>{
   if(e.key!=="Enter") return;
