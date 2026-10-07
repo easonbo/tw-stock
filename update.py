@@ -25,7 +25,9 @@ CACHE = os.path.join(ROOT, "cache")
 OUT   = os.path.join(ROOT, "site", "data")
 PXDIR = os.path.join(OUT, "px")
 TEST  = os.environ.get("TEST_MODE") == "1"
-INTRADAY = os.environ.get("INTRADAY") == "1"          # 盤中模式：只更新股價，籌碼沿用快取
+INTRADAY = os.environ.get("INTRADAY") == "1"          # 快速模式：只更新股價，籌碼沿用快取
+_now = dt.datetime.now(ZoneInfo("Asia/Taipei"))
+MARKET_OPEN = _now.weekday() < 5 and dt.time(8, 55) <= _now.time() < dt.time(13, 35)   # 依實際時間判斷是否盤中
 TZ    = ZoneInfo("Asia/Taipei")
 KEEP_ROWS, CHART_ROWS, MIN_ROWS = 1560, 250, 80   # 保留約 6 年日K（5 年回測＋指標暖身）
 
@@ -1084,7 +1086,7 @@ def main():
         except Exception as e:
             print(f"⚠ 機率打分失敗：{e}")
     last = max(r["date"] for r in rows)
-    meta = dict(updated=dt.datetime.now(TZ).strftime("%Y-%m-%d %H:%M"), last_date=last, intraday=INTRADAY,
+    meta = dict(updated=dt.datetime.now(TZ).strftime("%Y-%m-%d %H:%M"), last_date=last, intraday=INTRADAY and MARKET_OPEN,
                 price_source="永豐 Shioaji" if (SJ_KEY and SJ_SECRET) else "Yahoo Finance",
                 indices=fetch_indices(),
                 inst_date=max((r.get("inst_date") or "" for r in rows), default="") or None,
