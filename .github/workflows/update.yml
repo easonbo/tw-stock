@@ -3,11 +3,17 @@ name: 每日更新台股資料
 on:
   schedule:
     - cron: "*/30 1-5 * * 1-5"  # 台灣時間 9:00–13:30 每 30 分鐘：盤中股價
-    - cron: "30 7 * * 1-5"      # 台灣時間 15:30：收盤股價
-    - cron: "30 8 * * 1-5"      # 台灣時間 16:30：補三大法人
-    - cron: "30 9 * * 1-5"      # 台灣時間 17:30：再補一次三大法人
-    - cron: "40 13 * * 1-5"     # 台灣時間 21:40：補融資融券
+    - cron: "30 7 * * 1-5"      # 台灣時間 週一～五 15:30：股價（法人可能還沒公布）
+    - cron: "30 8 * * 1-5"      # 台灣時間 週一～五 16:30：補三大法人
+    - cron: "30 9 * * 1-5"      # 台灣時間 週一～五 17:30：再補一次三大法人（保險）
+    - cron: "40 13 * * 1-5"     # 台灣時間 週一～五 21:40：補融資融券（晚上才公布）
   workflow_dispatch:
+    inputs:
+      mode:
+        description: "更新模式（盤中快速＝只更新股價，約 5 分鐘）"
+        type: choice
+        options: [盤中快速, 完整]
+        default: 盤中快速
   push:
     branches: [main]
     paths: ["site/**", "update.py", ".github/workflows/**"]
@@ -32,6 +38,8 @@ jobs:
           python-version: "3.12"
           cache: pip
       - run: pip install -r requirements.txt
+      - name: 安裝永豐 Shioaji（選用，失敗時自動改用 Yahoo）
+        run: pip install shioaji || echo "shioaji 安裝失敗，改用 Yahoo"
       - name: 取回歷史價量快取
         uses: actions/cache/restore@v4
         with:
@@ -41,7 +49,9 @@ jobs:
       - name: 下載價量並計算指標
         run: python update.py
         env:
-          INTRADAY: ${{ github.event.schedule == '*/30 1-5 * * 1-5' && '1' || '0' }}
+          INTRADAY: ${{ (github.event.schedule == '*/30 1-5 * * 1-5' || inputs.mode == '盤中快速') && '1' || '0' }}
+          SJ_API_KEY: ${{ secrets.SJ_API_KEY }}
+          SJ_SECRET_KEY: ${{ secrets.SJ_SECRET_KEY }}
       - name: 儲存歷史價量快取
         if: always()
         uses: actions/cache/save@v4
