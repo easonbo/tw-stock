@@ -712,6 +712,7 @@ def snapshot(df, x):
         **upper_slope3(x["up"], x["ma20"], close),
         # ---- 關鍵價位（情境整理用）
         ma5v=L("ma5"), ma10v=L("ma10"), ma20v=L("ma20"), ma60v=L("ma60"), ma240v=L("ma240"),
+        bb_dn=L("dn"),
         high20=num(df["High"].iloc[-21:-1].max()), low20=num(df["Low"].iloc[-21:-1].min()),
         # ---- 當沖：CDP 逆勢操作價位（以今日高低收推算下一個交易日）
         **cdp_levels(num(df["High"].iloc[-1]), num(df["Low"].iloc[-1]), close),
