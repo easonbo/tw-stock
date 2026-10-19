@@ -25,8 +25,9 @@ permissions:
   pages: write
   id-token: write
 
+# 快速（盤中）與完整更新分開排隊，完整更新跑很久時不會把盤中更新擠掉
 concurrency:
-  group: pages
+  group: build-${{ (github.event.schedule == '7,37 1-5 * * 1-5' || inputs.mode == '盤中快速') && 'quick' || 'full' }}
   cancel-in-progress: false
 
 jobs:
@@ -67,6 +68,9 @@ jobs:
   deploy:
     needs: build
     runs-on: ubuntu-latest
+    concurrency:
+      group: pages-deploy
+      cancel-in-progress: false
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
