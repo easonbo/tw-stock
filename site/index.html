@@ -47,6 +47,10 @@ tbody tr{cursor:pointer}tbody tr:hover,tbody tr.sel{background:var(--hl)}
 #btBox table td,#btBox table th{font-size:13px}
 #btBox tr.click{cursor:pointer}#btBox tr.click:hover{background:var(--hl)}
 #btBox h3,#diag h3{font-size:15px;margin:14px 0 6px}
+.tpform{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:8px 14px;margin:8px 0}
+.tpform label{display:flex;flex-direction:column;gap:3px;font-size:13px;color:var(--mute)}
+.tpform input,.tpform select{padding:6px 8px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--fg);font:inherit}
+.tpbig{font-size:22px;font-weight:700;font-variant-numeric:tabular-nums}
 .posbar{position:relative;height:6px;border-radius:3px;background:linear-gradient(90deg,var(--dn),var(--line) 50%,var(--up));min-width:90px;margin-top:4px}
 .posbar i{position:absolute;top:-3px;width:3px;height:12px;background:var(--fg);border-radius:1px}
 .star{background:none;border:none;font-size:18px;cursor:pointer;color:#e0a800;padding:0 4px}
@@ -85,6 +89,7 @@ tbody tr{cursor:pointer}tbody tr:hover,tbody tr.sel{background:var(--hl)}
       <option value="1y">統計期間：近 1 年</option><option value="3y">統計期間：近 3 年</option><option value="5y">統計期間：近 5 年</option></select>
     <select id="btH" title="期間"><option value="5">5 個交易日內</option><option value="10" selected>10 個交易日內</option><option value="20">20 個交易日內</option></select>
     <select id="btT" title="漲幅門檻"><option value="5">漲 ≥ 5%</option><option value="10" selected>漲 ≥ 10%</option><option value="15">漲 ≥ 15%</option></select>
+    <button id="tpBtn">🧮 交易計畫</button>
     <button id="wlBtn">⭐ 自選股</button>
     <button id="pfBtn">💼 持股健檢</button>
     <button id="btBtn">📊 回測：哪些指標有效</button>
@@ -125,6 +130,7 @@ tbody tr{cursor:pointer}tbody tr:hover,tbody tr.sel{background:var(--hl)}
 </aside>
 
 <section>
+  <div id="tpBox" class="card" hidden style="margin-bottom:16px"></div>
   <div id="wlBox" class="card" hidden style="margin-bottom:16px"></div>
   <div id="pfBox" class="card" hidden style="margin-bottom:16px"></div>
   <div id="btBox" class="card" hidden style="margin-bottom:16px"></div>
@@ -531,7 +537,7 @@ async function showDiag(r){
      <td class="${x.lift>=1.2?"good":x.lift<1?"neg":""}">${fmt(x.lift,2)}×</td><td>${x.lift_h1??"–"} / ${x.lift_h2??"–"}</td><td>${x.n.toLocaleString()}</td></tr>`).join("");
   const pctile = isNum(prob) ? Math.round(DATA.filter(x=>isNum(x.prob)&&x.prob<=prob).length / DATA.filter(x=>isNum(x.prob)).length*100) : null;
   box.innerHTML=`
-   <div class="chartHead"><h2><button class="star" id="diagStar" title="加入／移除自選股">${wlHas(r.code)?"★":"☆"}</button>個股診斷：${r.code} ${r.name}　<span class="${r.chg_pct>0?"pos":r.chg_pct<0?"neg":""}">${fmt(r.close,2)}（${fmt(r.chg_pct,2)}%）</span></h2><button id="diagClose">關閉</button></div>
+   <div class="chartHead"><h2><button class="star" id="diagTP" title="用這檔做交易計畫">🧮</button><button class="star" id="diagStar" title="加入／移除自選股">${wlHas(r.code)?"★":"☆"}</button>個股診斷：${r.code} ${r.name}　<span class="${r.chg_pct>0?"pos":r.chg_pct<0?"neg":""}">${fmt(r.close,2)}（${fmt(r.chg_pct,2)}%）</span></h2><button id="diagClose">關閉</button></div>
    <p class="hint">${r.market}｜${r.industry}｜股價日期 ${r.date}${r.inst_date?`｜法人 ${r.inst_date}`:""}</p>
    <h3>${TLABEL()} 的機率（模型估計，依${PLABEL[PERIOD]}資料）</h3>
    ${isNum(prob)?`<div class="gauge"><span class="big ${lift>=1.3?"pos":""}">${fmt(prob,1)}%</span>
@@ -560,6 +566,7 @@ async function showDiag(r){
       ${kv("做多支撐",isNum(r.sup)?fmt(r.sup,2)+"（"+(r.sup_name||"")+"）":"–")}${kv("距做多支撐",r.sup_dist,1,{unit:"%"})}${kv("當沖方向",r.dt_dir)}</div>
    </div>`;
   $("diagClose").onclick=()=>{ box.hidden=true; };
+  $("diagTP").onclick=()=>openTP(r.code);
   $("diagStar").onclick=()=>{ wlToggle(r.code); $("diagStar").textContent=wlHas(r.code)?"★":"☆"; if(!$("wlBox").hidden) renderWL(); };
   box.scrollIntoView({behavior:"smooth",block:"start"});
 }
@@ -679,6 +686,107 @@ function renderWL(){
   box.querySelectorAll("tr[data-code]").forEach(tr=>tr.onclick=()=>{ const r=DATA.find(x=>x.code===tr.dataset.code); if(r){ $("sr").checked=true; openStock(r); } });
 }
 $("wlBtn").onclick=()=>{ const b=$("wlBox"); if(!b.hidden){ b.hidden=true; return; } b.hidden=false; renderWL(); b.scrollIntoView({behavior:"smooth"}); };
+
+// ------------------------------------------------------------------ 交易計畫計算機
+const TP_KEY="tw_tp_v1";
+function tpPrefs(){ try{ return JSON.parse(localStorage.getItem(TP_KEY)||"{}"); }catch(e){ return {}; } }
+function tpSavePrefs(o){ try{ localStorage.setItem(TP_KEY, JSON.stringify({...tpPrefs(),...o})); }catch(e){} }
+function tick(p){ return p<10?0.01:p<50?0.05:p<100?0.1:p<500?0.5:p<1000?1:5; }
+function roundDown(p){ const t=tick(p); return Math.floor(p/t+1e-9)*t; }
+function roundUp(p){ const t=tick(p); return Math.ceil(p/t-1e-9)*t; }
+function openTP(code){ const b=$("tpBox"); b.hidden=false; renderTP(code); b.scrollIntoView({behavior:"smooth"}); }
+function renderTP(code){
+  const P=tpPrefs(), box=$("tpBox");
+  box.innerHTML=`
+   <div class="chartHead"><h2>🧮 交易計畫計算機</h2><button id="tpClose">關閉</button></div>
+   <p class="hint">先決定「這筆最多虧多少」，再算可以買幾張。總資金、風險比例、手續費折數會記在這台裝置，下次不用重填。</p>
+   <div class="tpform">
+     <label>股票代號（選填，自動帶入價位）<input id="tpCode" value="${code||P.code||""}" placeholder="例：2330"></label>
+     <label>總資金（元）<input id="tpCap" type="number" value="${P.cap||1000000}" step="10000"></label>
+     <label>每筆最多虧總資金的 %<input id="tpRisk" type="number" value="${P.risk??1}" step="0.25" min="0.1"></label>
+     <label>交易類型<select id="tpType"><option value="swing">波段（一般買賣）</option><option value="day">當沖</option></select></label>
+     <label>買入價<input id="tpEntry" type="number" step="0.01"></label>
+     <label>停損方式<select id="tpStopM">
+       <option value="struct">結構：跌破最近支撐再 −1%</option><option value="vol">波動：買入價 − 1.5 × 平均振幅</option>
+       <option value="pct">固定比例</option><option value="manual">自訂停損價</option></select></label>
+     <label>固定比例（%）／自訂停損價<input id="tpStopV" type="number" step="0.01" placeholder="固定比例填 5，自訂填價格"></label>
+     <label>停利方式<select id="tpTgtM"><option value="r2">風險的 2 倍（2R）</option><option value="r15">風險的 1.5 倍</option>
+       <option value="res">第一壓力</option><option value="manual">自訂停利價</option></select></label>
+     <label>自訂停利價<input id="tpTgtV" type="number" step="0.01"></label>
+     <label>手續費折數（例：6 折填 0.6）<input id="tpDisc" type="number" value="${P.disc??0.6}" step="0.05" min="0" max="1"></label>
+   </div>
+   <div id="tpOut"></div>`;
+  $("tpType").value=P.type||"swing"; $("tpStopM").value=P.stopM||"struct"; $("tpTgtM").value=P.tgtM||"r2";
+  $("tpClose").onclick=()=>{ box.hidden=true; };
+  const fill=()=>{ const r=DATA.find(x=>x.code===$("tpCode").value.trim()); if(r && !$("tpEntry").dataset.touched) $("tpEntry").value=r.close; };
+  $("tpCode").oninput=()=>{ $("tpEntry").dataset.touched=""; fill(); calcTP(); };
+  $("tpEntry").oninput=()=>{ $("tpEntry").dataset.touched="1"; calcTP(); };
+  box.querySelectorAll(".tpform input,.tpform select").forEach(e=>{ if(e.id!=="tpCode"&&e.id!=="tpEntry") e.oninput=calcTP; });
+  fill(); calcTP();
+}
+function calcTP(){
+  const g=id=>$(id).value, n=id=>Number(g(id));
+  tpSavePrefs({cap:n("tpCap"), risk:n("tpRisk"), disc:n("tpDisc"), type:g("tpType"), stopM:g("tpStopM"), tgtM:g("tpTgtM"), code:g("tpCode").trim()});
+  const out=$("tpOut"), r=DATA.find(x=>x.code===g("tpCode").trim()), E=n("tpEntry");
+  if(!(E>0)){ out.innerHTML='<p class="hint">請輸入買入價（或輸入代號自動帶入現價）。</p>'; return; }
+  const day=g("tpType")==="day";
+  // 停損
+  let stop=null, stopWhy="";
+  const sm=g("tpStopM"), sv=n("tpStopV");
+  if(sm==="struct"){ const S=r?srLevels({...r, close:E}).S[0]:null;
+    if(S){ stop=S[1]*0.99; stopWhy=`${S[0]} ${fmt(S[1],2)} 再 −1%`; } else { stop=E*(day?0.98:0.94); stopWhy="找不到支撐，改用固定比例"; } }
+  if(sm==="vol"){ const a=r&&isNum(r.amp20)?r.amp20:4; stop=E*(1-1.5*a/100); stopWhy=`平均振幅 ${fmt(a,1)}% × 1.5`; }
+  if(sm==="pct"){ const p=sv>0?sv:(day?2:6); stop=E*(1-p/100); stopWhy=`固定 −${p}%`; }
+  if(sm==="manual"){ stop=sv; stopWhy="自訂"; }
+  if(!(stop>0) || stop>=E){ out.innerHTML='<p class="lv-bad">停損價必須低於買入價。</p>'; return; }
+  stop=roundDown(stop);
+  const risk=E-stop;
+  // 停利
+  let tgt=null, tgtWhy=""; const tm=g("tpTgtM");
+  if(tm==="r2"){ tgt=E+2*risk; tgtWhy="2R"; }
+  if(tm==="r15"){ tgt=E+1.5*risk; tgtWhy="1.5R"; }
+  if(tm==="res"){ const R=r?srLevels({...r, close:E}).R[0]:null; if(R){ tgt=R[1]; tgtWhy=R[0]; } else { tgt=E+2*risk; tgtWhy="無壓力資料，改用 2R"; } }
+  if(tm==="manual"){ tgt=n("tpTgtV"); tgtWhy="自訂"; }
+  if(!(tgt>E)){ out.innerHTML='<p class="lv-bad">停利價必須高於買入價。</p>'; return; }
+  tgt=roundDown(tgt);
+  // 成本（手續費買賣各 0.1425% × 折數，最低 20 元；證交稅：當沖 0.15%、一般 0.3%）
+  const disc=n("tpDisc")||1, taxR=day?0.0015:0.003;
+  const fee=v=>Math.max(20, Math.round(v*0.001425*disc));
+  const maxLoss=n("tpCap")*n("tpRisk")/100;
+  const perShareLoss = risk + (E+stop)*0.001425*disc + stop*taxR;
+  let shares=Math.floor(maxLoss/perShareLoss);
+  const capShares=Math.floor(n("tpCap")/(E*(1+0.001425*disc))); const capped=shares>capShares; if(capped) shares=capShares;
+  const lots=Math.floor(shares/1000), odd=shares-lots*1000;
+  const cost=E*shares, cash=cost/n("tpCap")*100;
+  const lossAmt=shares? risk*shares + fee(E*shares)+fee(stop*shares)+Math.round(stop*shares*taxR) : 0;
+  const winAmt =shares? (tgt-E)*shares - fee(E*shares)-fee(tgt*shares)-Math.round(tgt*shares*taxR) : 0;
+  const rr=(tgt-E)/risk, be = lossAmt/(lossAmt+winAmt)*100;
+  // 檢查清單
+  const chk=[];
+  if(r){ chk.push([r.ma20_s>0,"月線往上（月線斜率 > 0）"]); chk.push([r.bias20<10,`乖離 < 10%（目前 ${fmt(r.bias20,1)}%）`]); }
+  const tw=(META.indices||[]).find(x=>x.key==="TAIEX"); if(tw&&isNum(tw.chg_pct)) chk.push([tw.chg_pct>-1,`加權指數今日跌幅 < 1%（目前 ${fmt(tw.chg_pct,2)}%）`]);
+  chk.push([rr>=1.5,`風險報酬比 ≥ 1.5（目前 ${fmt(rr,2)}）`]);
+  chk.push([cash<=30,`單筆投入 ≤ 總資金 30%（目前 ${fmt(cash,1)}%）`]);
+  if(day) chk.push([true,"當沖：13:20 前平倉；確認可現股當沖、非處置／注意股"]);
+  const pass=chk.every(c=>c[0]);
+  out.innerHTML=`
+   <div class="dgrid">
+     <div class="dbox"><b>可以買多少</b><div class="tpbig">${lots} 張${odd?` ＋ ${odd} 股`:""}</div>
+       ${kv("合計股數",shares.toLocaleString()+" 股")}${kv("投入金額",Math.round(cost).toLocaleString()+" 元（"+fmt(cash,1)+"% 資金）")}
+       ${kv("這筆最多虧（上限）",Math.round(maxLoss).toLocaleString()+" 元")}${shares<1000?'<p class="hint">不到 1 張，需用盤中零股交易。</p>':""}${capped?'<p class="lv-warn">依風險可買更多，但已達總資金上限。</p>':""}</div>
+     <div class="dbox"><b>停損</b><div class="tpbig neg">${fmt(stop,2)}</div>
+       ${kv("距買入價",fmt((stop/E-1)*100,2)+"%")}${kv("依據",stopWhy)}${kv("碰到時預估虧損（含成本）","−"+Math.round(lossAmt).toLocaleString()+" 元")}</div>
+     <div class="dbox"><b>停利</b><div class="tpbig pos">${fmt(tgt,2)}</div>
+       ${kv("距買入價","+"+fmt((tgt/E-1)*100,2)+"%")}${kv("依據",tgtWhy)}${kv("碰到時預估獲利（含成本）","+"+Math.round(winAmt).toLocaleString()+" 元")}
+       ${kv("建議做法","先賣一半，其餘改用移動停損")}</div>
+     <div class="dbox"><b>這筆交易的數學</b>${kv("風險報酬比",fmt(rr,2)+" : 1")}${kv("損益兩平勝率",fmt(be,0)+"%")}
+       <p class="hint">長期執行時，成功率要高於這個數字才會賺錢。</p></div>
+   </div>
+   <h3>進場前檢查 ${pass?'<span class="lv-good">全部通過</span>':'<span class="lv-bad">有項目未通過</span>'}</h3>
+   ${chk.map(([ok,t])=>`<div class="kv"><span>${ok?"✅":"❌"} ${t}</span><span></span></div>`).join("")}
+   <p class="hint">價格已依台股跳動單位調整。手續費以 0.1425% × 折數計（最低 20 元），證交稅一般 0.3%、當沖 0.15%，實際以券商與稅法為準。這是計算工具，不是買賣建議。</p>`;
+}
+$("tpBtn").onclick=()=>{ const b=$("tpBox"); if(!b.hidden){ b.hidden=true; return; } openTP(""); };
 
 function openStock(r){ current={code:r.code,name:r.name,row:r}; showDiag(r); drawChart(r.code,r.name); }
 $("q").addEventListener("keydown",e=>{
