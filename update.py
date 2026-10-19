@@ -156,6 +156,7 @@ def fake_prices(listed):
 # 一次最多 500 檔快照，盤中與收盤後用它更新「今天」這根 K 棒；失敗時自動退回 Yahoo。
 SJ_KEY, SJ_SECRET = os.environ.get("SJ_API_KEY", "").strip(), os.environ.get("SJ_SECRET_KEY", "").strip()
 SJ_INDEX = {}
+MIS_IDX = {}
 
 # --------------------------------------------------------------------------- 大盤指數
 INDEX_DEF = [("TAIEX", "加權指數", "^TWII"), ("TPEX", "櫃買指數", "^TWOII")]
@@ -177,9 +178,30 @@ def tpex_index_official():
     return dict(close=round(c, 2), chg=round(ch, 2), chg_pct=round(ch / prev * 100, 2) if prev else None,
                 date=d, spark=[round(r[1], 2) for r in rows[-30:]], source="櫃買中心")
 
+def mis_indices():
+    """證交所 MIS 即時指數：加權 tse_t00、櫃買 otc_o00。盤中為即時值，收盤後為當日收盤。"""
+    j = get_json("https://mis.twse.com.tw/stock/api/getStockInfo.jsp",
+                 {"ex_ch": "tse_t00.tw|otc_o00.tw", "json": 1, "delay": 0}, timeout=20)
+    out = {}
+    for it in (j or {}).get("msgArray", []):
+        key = {"t00": "TAIEX", "o00": "TPEX"}.get(it.get("c"))
+        z, y = to_num(it.get("z")), to_num(it.get("y"))
+        if not key or np.isnan(z) or np.isnan(y) or y <= 0:
+            continue
+        out[key] = dict(close=round(z, 2), chg=round(z - y, 2), chg_pct=round((z / y - 1) * 100, 2),
+                        date=_iso(it.get("d")), time=(it.get("t") or "")[:5], source="證交所即時")
+    return out
+
 def fetch_indices():
     """回傳 [{key, name, close, chg, chg_pct, date, spark}]；永豐盤中快照優先，其餘用 Yahoo。"""
     out = []
+    global MIS_IDX
+    try:
+        MIS_IDX = {} if TEST else mis_indices()
+        if MIS_IDX:
+            print("即時指數：" + "、".join(f"{k} {v['close']}" for k, v in MIS_IDX.items()))
+    except Exception as e:
+        print(f"⚠ 即時指數失敗：{e}"); MIS_IDX = {}
     if TEST:
         rng = np.random.default_rng(7)
         for key, name, _ in INDEX_DEF:
@@ -204,6 +226,14 @@ def fetch_indices():
                         chg_pct=round(float(c.iloc[-1] / c.iloc[-2] - 1) * 100, 2), date=c.index[-1].strftime("%Y-%m-%d"))
         if key == "TPEX" and (item["close"] is None or (item["date"] or "") < (out[0]["date"] if out and out[0]["date"] else "")):
             item.update(tpex_index_official())                    # Yahoo 沒有或較舊時，改用櫃買中心官方資料
+        mi = MIS_IDX.get(key)
+        if mi and mi.get("date") and mi["date"] >= (item.get("date") or ""):   # 證交所即時指數（最新）
+            sp = item.get("spark") or []
+            if item.get("date") == mi["date"] and sp:
+                sp[-1] = mi["close"]
+            else:
+                sp = (sp + [mi["close"]])[-30:]
+            item.update(mi, spark=sp)
         sj = SJ_INDEX.get(key)
         if sj:                                                    # 永豐即時快照覆蓋最新值
             item.update(close=round(sj["close"], 2), chg=round(sj["chg"], 2), chg_pct=round(sj["chg_pct"], 2),
@@ -211,7 +241,24 @@ def fetch_indices():
             if item["spark"]:
                 item["spark"][-1] = item["close"]
         out.append(item)
+    # 自行累積每日收盤，補足走勢小圖（櫃買中心官方資料只給最近幾筆）
+    try:
+        path = os.path.join(CACHE, "index_hist.json")
+        store = json.load(open(path, encoding="utf-8")) if os.path.exists(path) else {}
+        for it in out:
+            h = store.setdefault(it["key"], {})
+            if it.get("date") and isNum(it.get("close")):
+                h[it["date"]] = it["close"]
+            if len(h) > len(it.get("spark") or []):
+                it["spark"] = [h[d] for d in sorted(h)][-30:]
+            store[it["key"]] = {d: h[d] for d in sorted(h)[-60:]}
+        json.dump(store, open(path, "w", encoding="utf-8"))
+    except Exception as e:
+        print(f"⚠ 指數歷史快取失敗：{e}")
     return out
+
+def isNum(v):
+    return isinstance(v, (int, float)) and not (isinstance(v, float) and np.isnan(v))
 
 def sj_today_bars(codes):
     """回傳 {代號: 今天的 OHLCV DataFrame（1 列）}；沒有金鑰、登入失敗或今天沒交易時回傳空 dict。"""
@@ -264,7 +311,68 @@ def sj_today_bars(codes):
             pass
     return out
 
+# --------------------------------------------------------------------------- 官方行情（免金鑰，Yahoo 失敗時的主要備援）
+# 盤中：證交所 MIS 即時報價（上市＋上櫃）；收盤後：證交所 STOCK_DAY_ALL、櫃買中心 daily_close_quotes
+def _bar(o, h, l, c, v, day):
+    vals = [to_num(o), to_num(h), to_num(l), to_num(c), to_num(v)]
+    if any(np.isnan(x) for x in vals) or vals[3] <= 0 or vals[4] <= 0:
+        return None
+    o, h, l, c, v = vals
+    return pd.DataFrame({"Open": [o or c], "High": [max(h, c)], "Low": [min(l, c) if l > 0 else c], "Close": [c],
+                         "Volume": [v]}, index=pd.DatetimeIndex([pd.Timestamp(day)]))
+
+def mis_today_bars(listed):
+    """證交所 MIS 盤中報價：每次約 50 檔。回傳 {代號: 今日 K 棒}。"""
+    out, today = {}, dt.datetime.now(TZ).strftime("%Y%m%d")
+    keys = [("otc_" if s["market"] == "上櫃" else "tse_") + s["code"] + ".tw" for s in listed]
+    for i in range(0, len(keys), 50):
+        j = get_json("https://mis.twse.com.tw/stock/api/getStockInfo.jsp",
+                     {"ex_ch": "|".join(keys[i:i + 50]), "json": 1, "delay": 0}, timeout=20)
+        for it in (j or {}).get("msgArray", []):
+            if it.get("d") != today:
+                continue
+            z = it.get("z")
+            if z in (None, "-", ""):                              # 最近一筆沒有成交價：用最佳買價第一檔
+                z = (it.get("b") or "").split("_")[0] or None
+            b = _bar(it.get("o"), it.get("h"), it.get("l"), z, to_num(it.get("v")) * 1000, today)
+            if b is not None:
+                out[str(it.get("c"))] = b
+        time.sleep(0.6)
+    return out
+
+def close_today_bars():
+    """收盤後官方日成交：回傳 {代號: 當日 K 棒}（日期以交易所資料為準）。"""
+    out = {}
+    tse = get_json(f"{OPENAPI}/exchangeReport/STOCK_DAY_ALL", timeout=60)
+    for x in tse if isinstance(tse, list) else []:
+        d = _iso(x.get("Date"))
+        b = d and _bar(x.get("OpeningPrice"), x.get("HighestPrice"), x.get("LowestPrice"), x.get("ClosingPrice"),
+                       x.get("TradeVolume"), d)
+        if b is not None:
+            out[str(x.get("Code", "")).strip()] = b
+    otc = get_json("https://www.tpex.org.tw/openapi/v1/tpex_mainboard_daily_close_quotes", timeout=60)
+    for x in otc if isinstance(otc, list) else []:
+        d = _iso(x.get("Date"))
+        b = d and _bar(x.get("Open"), x.get("High"), x.get("Low"), x.get("Close"), x.get("TradingShares"), d)
+        if b is not None:
+            out[str(x.get("SecuritiesCompanyCode", "")).strip()] = b
+    return out
+
+def official_bars(listed):
+    if TEST:
+        return {}
+    try:
+        bars = mis_today_bars(listed) if MARKET_OPEN else close_today_bars()
+        print(f"官方行情（{'盤中 MIS' if MARKET_OPEN else '收盤日成交'}）：{len(bars)} 檔")
+        return bars
+    except Exception as e:
+        print(f"⚠ 官方行情失敗：{e}")
+        return {}
+
+PRICE_SRC = "Yahoo Finance"
+
 def update_history(listed):
+    global PRICE_SRC
     path = os.path.join(CACHE, "hist.pkl")
     hist = pickle.load(open(path, "rb")) if os.path.exists(path) else {}
     if TEST:
@@ -277,13 +385,18 @@ def update_history(listed):
     need = [c for c in tick if c not in have]
     print(f"增量更新 {len(have)} 檔，完整下載 {len(need)} 檔")
     sj_bars = sj_today_bars(list(tick))
+    off_bars = official_bars(listed)
+    live = {**off_bars, **sj_bars}                                 # 永豐 > 官方
     jobs = [(need, "7y")]
-    if not (INTRADAY and len(sj_bars) > 0.8 * len(have)):        # 盤中若永豐快照成功，就不必再抓 Yahoo
+    if not (INTRADAY and len(live) > 0.8 * len(have)):            # 快速模式若官方／永豐已拿到今天的價格，就不必再抓 Yahoo
         jobs.insert(0, (have, "5d" if INTRADAY else "1mo"))
     for codes, period in jobs:
         if not codes:
             continue
-        got = yf_download([tick[c] for c in codes], period=period)
+        try:
+            got = yf_download([tick[c] for c in codes], period=period)
+        except Exception as e:
+            print(f"⚠ Yahoo 下載失敗（改用官方資料與快取）：{e}"); got = {}
         for c in codes:
             new = got.get(tick[c])
             if new is None:
@@ -292,7 +405,9 @@ def update_history(listed):
             df = new if old is None else pd.concat([old, new])
             df = df[~df.index.duplicated(keep="last")].sort_index()
             hist[c] = df.tail(KEEP_ROWS)
-    for c, bar in sj_bars.items():                                # 用永豐快照覆蓋／補上今天這根 K 棒
+    if live:
+        PRICE_SRC = "永豐 Shioaji" if sj_bars else ("證交所／櫃買中心（盤中）" if MARKET_OPEN else "證交所／櫃買中心")
+    for c, bar in live.items():                                   # 用官方／永豐資料覆蓋或補上今天這根 K 棒
         if c in hist:
             df = pd.concat([hist[c], bar])
             hist[c] = df[~df.index.duplicated(keep="last")].sort_index().tail(KEEP_ROWS)
@@ -1087,7 +1202,7 @@ def main():
             print(f"⚠ 機率打分失敗：{e}")
     last = max(r["date"] for r in rows)
     meta = dict(updated=dt.datetime.now(TZ).strftime("%Y-%m-%d %H:%M"), last_date=last, intraday=INTRADAY and MARKET_OPEN,
-                price_source="永豐 Shioaji" if (SJ_KEY and SJ_SECRET) else "Yahoo Finance",
+                price_source=PRICE_SRC,
                 indices=fetch_indices(),
                 inst_date=max((r.get("inst_date") or "" for r in rows), default="") or None,
                 margin_date=max((r.get("margin_date") or "" for r in rows), default="") or None,
