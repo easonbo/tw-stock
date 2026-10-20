@@ -83,7 +83,7 @@ tbody tr{cursor:pointer}tbody tr:hover,tbody tr.sel{background:var(--hl)}
 </style>
 </head>
 <body>
-<header><h1>台股上市櫃 技術選股</h1><span id="status">載入中…</span>
+<header><h1>台股上市櫃 技術選股</h1><span id="status">載入中…</span><span id="liveStat" class="hint"></span>
   <span style="margin-left:auto;display:flex;gap:8px;align-items:center">
     <select id="btPeriod" title="上漲機率與回測使用的歷史期間">
       <option value="1y">統計期間：近 1 年</option><option value="3y">統計期間：近 3 年</option><option value="5y">統計期間：近 5 年</option></select>
@@ -309,6 +309,7 @@ fetch("data/snapshot.json?t="+Date.now()).then(r=>{ if(!r.ok) throw new Error(r.
   DATA=j.rows.map(r=>{ for(const k in r) if(r[k]===null && !/^(code|name|market|industry|date|inst_date|margin_date|sup_name|w_date)$/.test(k)) r[k]=NaN; return chipFlags(r); });
   $("status").textContent = (j.intraday?"🟢 盤中資料（非即時，約 30–60 分鐘更新）｜":"") + `股價 ${j.last_date}｜法人 ${j.inst_date||"–"}｜資券 ${j.margin_date||"–"}｜權證 ${j.warrant_date||"–"}｜更新於 ${j.updated}${j.price_source?"（"+j.price_source+"）":""}｜${j.n_rows} 檔`+(j.n_stale?`（${j.n_stale} 檔股價較舊）`:"");
   renderBreadth();
+  startLive();
   loadBT().then(()=>{ computeProbs(); render(); if(!$("wlBox").hidden) renderWL(); });
   if(location.hash==="#watch"){ $("wlBox").hidden=false; renderWL(); }
   [...new Set(DATA.map(r=>r.industry))].sort((a,b)=>a.localeCompare(b,"zh-Hant")).forEach(i=>$("ind").add(new Option(i,i)));
@@ -354,8 +355,9 @@ function renderBreadth(){
   const html=["上市","上櫃"].map(mkt=>{
     const rs=DATA.filter(r=>r.market===mkt && isNum(r.chg_pct) && r.date===META.last_date);
     const n=rs.length; if(!n) return "";
-    const up=rs.filter(r=>r.chg_pct>0).length, dn=rs.filter(r=>r.chg_pct<0).length, fl=n-up-dn;
-    const lu=rs.filter(r=>r.chg_pct>=9.5).length, ld=rs.filter(r=>r.chg_pct<=-9.5).length;
+    const cp=r=>r._base_chg ?? r.chg_pct;
+    const up=rs.filter(r=>cp(r)>0).length, dn=rs.filter(r=>cp(r)<0).length, fl=n-up-dn;
+    const lu=rs.filter(r=>cp(r)>=9.5).length, ld=rs.filter(r=>cp(r)<=-9.5).length;
     const pu=up/n*100, pd=dn/n*100, pf=fl/n*100;
     const tone = pu>=60?"偏多":pd>=60?"偏空":"多空分歧";
     return `<div class="bcard"><div class="t"><b>${mkt}</b><span class="hint">共 ${n.toLocaleString()} 檔｜${tone}</span></div>
@@ -365,6 +367,59 @@ function renderBreadth(){
       <div class="bbar"><i style="width:${pu}%;background:var(--up)"></i><i style="width:${pf}%;background:var(--mute)"></i><i style="width:${pd}%;background:var(--dn)"></i></div></div>`;
   }).join("");
   $("breadth").innerHTML = renderIndices() + html + (html?`<div class="hint" style="flex-basis:100%">漲跌家數依本網站收錄的上市櫃一般股計算（不含 ETF、權證、特別股及上市未滿 80 個交易日的股票），漲停／跌停以漲跌幅 ≥ 9.5% 估算，與交易所公布數字可能略有差異。${META.intraday?"盤中資料，非即時。":""}</div>`:"");
+}
+
+// ------------------------------------------------------------------ 即時報價（開網頁就更新，需設定 config.json 的 live_api）
+let CFG={}, LIVE_T="", liveTimer=null;
+async function loadCfg(){ try{ const r=await fetch("config.json?t="+Date.now()); if(r.ok) CFG=await r.json(); }catch(e){} }
+function twNow(){ return new Date(new Date().toLocaleString("en-US",{timeZone:"Asia/Taipei"})); }
+function twToday(){ const d=twNow(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`; }
+function mktOpen(){ const d=twNow(), m=d.getHours()*60+d.getMinutes(); return d.getDay()>=1&&d.getDay()<=5&&m>=540&&m<=815; }
+function liveCodes(){
+  const set=new Set([...wlLoad(), ...pfLoad().map(h=>h.code), ...(lastRows||[]).slice(0,60).map(r=>r.code)]);
+  if(current) set.add(current.code);
+  return [...set].map(c=>DATA.find(x=>x.code===c)).filter(Boolean).map(r=>(r.market==="上櫃"?"otc_":"tse_")+r.code);
+}
+async function liveRefresh(){
+  if(!CFG.live_api) return;
+  const api=CFG.live_api.replace(/\/$/,""), keys=["tse_t00","otc_o00",...liveCodes()], items=[];
+  for(let i=0;i<keys.length;i+=100){
+    try{ const r=await fetch(api+"/quote?codes="+keys.slice(i,i+100).join(",")); if(r.ok) items.push(...((await r.json()).items||[])); }catch(e){}
+  }
+  let t="", n=0;
+  for(const it of items){
+    const y=+it.y; let z=+it.z; if(!(z>0)) z=+((it.b||"").split("_")[0]); if(!(z>0&&y>0)) continue;
+    t=it.t||t;
+    if(it.c==="t00"||it.c==="o00"){
+      const ix=(META.indices||[]).find(x=>x.key===(it.c==="t00"?"TAIEX":"TPEX"));
+      if(ix){ ix.close=z; ix.chg=z-y; ix.chg_pct=(z/y-1)*100; ix.time=(it.t||"").slice(0,5); ix.source="即時"; ix.date=twToday();
+              if(ix.spark&&ix.spark.length) ix.spark[ix.spark.length-1]=z; }
+      continue;
+    }
+    const r=DATA.find(x=>x.code===it.c); if(!r) continue;
+    if(r._base_chg===undefined) r._base_chg=r.chg_pct;
+    r.close=z; r.chg_pct=(z/y-1)*100; if(+it.v>0) r.vol_lots=+it.v; n++;
+  }
+  if(!items.length){ $("liveStat").textContent="｜即時報價暫時無法取得"; return; }
+  LIVE_T=t.slice(0,5);
+  $("liveStat").textContent=`｜⚡ 即時報價 ${LIVE_T}（大盤、自選股、持股與表格前 60 檔，共 ${n} 檔；技術指標以「更新於」時間計算）`;
+  renderBreadth(); render();
+  if(!$("wlBox").hidden) renderWL(); if(!$("pfBox").hidden) renderPF();
+}
+async function maybeRebuild(){
+  // 資料太舊時，請伺服器在背景重新計算（約 5–10 分鐘後重新整理可看到新的技術指標）
+  if(!CFG.live_api || !META.updated) return;
+  const age=(twNow()-new Date(META.updated.replace(" ","T")))/60000, d=twNow(), m=d.getHours()*60+d.getMinutes();
+  const weekday=d.getDay()>=1&&d.getDay()<=5;
+  const stale = (mktOpen() && age>30) || (weekday && m>=870 && (META.last_date<twToday() || META.intraday));
+  if(!stale) return;
+  try{ const r=await fetch(CFG.live_api.replace(/\/$/,"")+"/refresh"); if(r.ok) $("liveStat").textContent+="｜已在背景更新完整資料，約 10 分鐘後重新整理"; }catch(e){}
+}
+async function startLive(){
+  await loadCfg(); if(!CFG.live_api) return;
+  await liveRefresh(); maybeRebuild();
+  clearInterval(liveTimer);
+  liveTimer=setInterval(()=>{ if(mktOpen() && document.visibilityState==="visible") liveRefresh(); }, 60000);
 }
 
 // ------------------------------------------------------------------ 篩選
